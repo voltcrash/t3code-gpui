@@ -1,0 +1,33 @@
+[package]
+name = "t3-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom = "0.4.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+t3-client = { version = "0.1.0", path = "../t3-client" }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = [
+  "rt-multi-thread",
+  "process",
+  "io-util",
+  "net",
+  "time",
+  "macros",
+  "sync",
+] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+
+[dev-dependencies]
+futures-util = "0.3.34"
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
