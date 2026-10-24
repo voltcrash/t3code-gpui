@@ -12,6 +12,7 @@ use gpui_kit::{AsyncApp, Context, SharedString, Subscription, Task, WeakEntity};
 use serde_json::{Value, json};
 use t3_client::RpcClient;
 use t3_client::auth::{self, ClientMetadata};
+use t3_client::commands;
 use t3_client::shell::{self, ShellCapabilities, ShellState, ShellStreamItem};
 use t3_host::{Backend, BackendLaunch};
 use url::Url;
@@ -40,6 +41,8 @@ pub struct LocalEnvironment {
     pub capabilities: ShellCapabilities,
     /// The live socket, for views that open their own subscriptions.
     pub rpc: Option<RpcClient>,
+    /// The server resolves send and stop commands (`commands::supported`).
+    pub commands_supported: bool,
     _run: Task<()>,
     _quit: Subscription,
 }
@@ -78,6 +81,7 @@ impl LocalEnvironment {
             shell: ShellState::default(),
             capabilities: ShellCapabilities::default(),
             rpc: None,
+            commands_supported: false,
             _run: run,
             _quit: quit,
         }
@@ -148,6 +152,7 @@ async fn run(
             };
             env.state = ConnectionState::Connected;
             env.rpc = Some(rpc.clone());
+            env.commands_supported = commands::supported(&config);
             cx.notify();
             env.shell.sequence
         })?;
