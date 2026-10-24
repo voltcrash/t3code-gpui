@@ -38,6 +38,8 @@ pub struct LocalEnvironment {
     pub state: ConnectionState,
     pub shell: ShellState,
     pub capabilities: ShellCapabilities,
+    /// The live socket, for views that open their own subscriptions.
+    pub rpc: Option<RpcClient>,
     _run: Task<()>,
     _quit: Subscription,
 }
@@ -75,6 +77,7 @@ impl LocalEnvironment {
             state: ConnectionState::StartingServer,
             shell: ShellState::default(),
             capabilities: ShellCapabilities::default(),
+            rpc: None,
             _run: run,
             _quit: quit,
         }
@@ -144,6 +147,7 @@ async fn run(
                 snooze: capabilities["threadSnooze"] == true,
             };
             env.state = ConnectionState::Connected;
+            env.rpc = Some(rpc.clone());
             cx.notify();
             env.shell.sequence
         })?;
@@ -201,6 +205,9 @@ fn set_state(
     state: ConnectionState,
 ) -> anyhow::Result<()> {
     this.update(cx, |env, cx| {
+        if !matches!(state, ConnectionState::Connected) {
+            env.rpc = None;
+        }
         env.state = state;
         cx.notify();
     })

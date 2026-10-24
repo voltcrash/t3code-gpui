@@ -7,12 +7,14 @@ use gpui_kit::*;
 
 use crate::environment::{ConnectionState, LocalEnvironment};
 use crate::sidebar::{Sidebar, SidebarEvent};
+use crate::thread_view::ThreadView;
 
 const SIDEBAR_WIDTH: Pixels = px(280.);
 
 pub struct Workspace {
     env: Entity<LocalEnvironment>,
     sidebar: Entity<Sidebar>,
+    thread: Option<Entity<ThreadView>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -21,15 +23,25 @@ impl Workspace {
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), cx));
         let subscriptions = vec![
             cx.observe(&env, |_, _, cx| cx.notify()),
-            cx.subscribe(&sidebar, |_, _, event: &SidebarEvent, cx| match event {
-                SidebarEvent::SelectionChanged => cx.notify(),
+            cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| match event {
+                SidebarEvent::SelectionChanged => this.open_selected(cx),
             }),
         ];
         Self {
             env,
             sidebar,
+            thread: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn open_selected(&mut self, cx: &mut Context<Self>) {
+        let selected = self.sidebar.read(cx).selected().cloned();
+        let current = self.thread.as_ref().map(|view| view.read(cx).thread_id());
+        if selected.as_ref() != current {
+            self.thread = selected.map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, cx)));
+        }
+        cx.notify();
     }
 
     fn render_main(&self, cx: &App) -> AnyElement {
@@ -88,40 +100,57 @@ impl Workspace {
             ),
         };
 
-        let body = match (&env.state, thread) {
-            (ConnectionState::Failed(error), _) => v_flex()
-                .gap_2()
-                .max_w(px(720.))
-                .child(
-                    div()
-                        .text_base()
-                        .font_medium()
-                        .child("The T3 Code server stopped"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .child(error.clone()),
-                ),
-            (_, Some(_)) => v_flex(),
-            (_, None) => v_flex()
+        let centered = |content: Div| {
+            v_flex()
+                .flex_1()
                 .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_base()
-                        .font_medium()
-                        .child("Pick a thread to continue"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_center()
-                        .text_color(theme.muted_foreground)
-                        .child("Select an existing thread or create a new one to get started."),
-                ),
+                .justify_center()
+                .p_8()
+                .child(content)
+                .into_any_element()
+        };
+        let body = match (&env.state, thread.and(self.thread.as_ref())) {
+            (ConnectionState::Failed(error), _) => centered(
+                v_flex()
+                    .gap_2()
+                    .max_w(px(720.))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_medium()
+                            .child("The T3 Code server stopped"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .child(error.clone()),
+                    ),
+            ),
+            (_, Some(view)) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .child(view.clone())
+                .into_any_element(),
+            (_, None) => centered(
+                v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_medium()
+                            .child("Pick a thread to continue"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_center()
+                            .text_color(theme.muted_foreground)
+                            .child("Select an existing thread or create a new one to get started."),
+                    ),
+            ),
         };
 
         v_flex()
@@ -130,14 +159,7 @@ impl Workspace {
             .h_full()
             .bg(theme.background)
             .child(header)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .p_8()
-                    .child(body),
-            )
+            .child(body)
             .into_any_element()
     }
 }
