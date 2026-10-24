@@ -5,7 +5,10 @@ use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, Result, SharedString};
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Pin, AlarmClock, GitBranch, ArrowUp, Square]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [Pin, AlarmClock, GitBranch, ArrowUp, Square, SquarePen]
+);
 
 pub struct AppAssets;
 

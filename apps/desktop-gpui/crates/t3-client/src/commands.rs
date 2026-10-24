@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{RpcClient, RpcError};
 
 pub const DISPATCH: &str = "orchestration.dispatchCommand";
+pub const LAUNCH_THREAD: &str = "orchestration.launchThread";
 
 /// The desktop shell has always identified as the web client.
 const CREATION_SOURCE: &str = "web";
@@ -98,6 +99,53 @@ pub fn dismiss_user_input(thread_id: &str, request_id: &str) -> Value {
     })
 }
 
+/// `deriveThreadTitleSeed` for plain text: whitespace collapsed, then cut
+/// at 50 characters like `truncate` in `packages/shared/src/String.ts`.
+pub fn title_seed(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "New thread".into();
+    }
+    // `String.slice` counts UTF-16 code units.
+    let units: Vec<u16> = normalized.encode_utf16().collect();
+    if units.len() <= 50 {
+        return normalized;
+    }
+    let cut = String::from_utf16_lossy(&units[..50]);
+    format!("{}...", cut.trim_end_matches('\u{FFFD}'))
+}
+
+pub struct NewThread<'a> {
+    pub project_id: &'a str,
+    pub model_selection: &'a Value,
+    pub runtime_mode: &'a str,
+    pub text: &'a str,
+}
+
+/// `startThreadTurn` for a draft: `orchestration.launchThread` creates the
+/// thread in the project's checkout and sends its first message.
+pub fn launch_thread(thread: &NewThread<'_>) -> (String, Value) {
+    let thread_id = new_id();
+    let input = json!({
+        "commandId": new_id(),
+        "creationSource": CREATION_SOURCE,
+        "threadId": thread_id,
+        "projectId": thread.project_id,
+        "title": title_seed(thread.text),
+        "generateTitle": true,
+        "modelSelection": thread.model_selection,
+        "runtimeMode": thread.runtime_mode,
+        "interactionMode": "default",
+        "workspaceStrategy": { "type": "root" },
+        "initialMessage": {
+            "messageId": new_id(),
+            "text": thread.text,
+            "attachments": [],
+        },
+    });
+    (thread_id, input)
+}
+
 pub async fn dispatch(rpc: &RpcClient, command: &Value) -> Result<DispatchResult, RpcError> {
     rpc.call(DISPATCH, command).await
 }
@@ -119,6 +167,14 @@ mod tests {
         assert_ne!(first["commandId"], second["commandId"]);
         assert_ne!(first["messageId"], second["messageId"]);
         assert_ne!(first["commandId"], first["messageId"]);
+    }
+
+    #[test]
+    fn title_seeds_collapse_whitespace_and_truncate() {
+        assert_eq!(title_seed("  fix   the\nbuild "), "fix the build");
+        assert_eq!(title_seed("   "), "New thread");
+        let long = "a".repeat(60);
+        assert_eq!(title_seed(&long), format!("{}...", "a".repeat(50)));
     }
 
     #[test]
