@@ -203,9 +203,9 @@ impl Backend {
         }
     }
 
-    /// Resolves when the server exits on its own.
-    pub async fn exited(&mut self) -> std::io::Result<ExitStatus> {
-        self.child.wait().await
+    /// The exit status if the server has already stopped.
+    pub fn try_exited(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().ok().flatten()
     }
 
     /// The last lines the server printed, for error reports.
