@@ -68,6 +68,24 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         .unwrap_err();
     assert!(matches!(unknown, RpcError::Defect(_)), "{unknown:?}");
 
+    // The commands decode: the orchestrator, not the schema, rejects them.
+    assert!(t3_client::commands::supported(&config));
+    let missing = "thread-that-does-not-exist";
+    for command in [
+        t3_client::commands::stop_thread(missing),
+        t3_client::commands::send_message(missing, "hello"),
+    ] {
+        let rejected = t3_client::commands::dispatch(&client, &command)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            rejected.failure_tag(),
+            Some("OrchestrationV2DispatchCommandError"),
+            "{rejected:?}"
+        );
+        assert!(rejected.detail().contains(missing), "{rejected:?}");
+    }
+
     // The socket survives an interrupted stream and a failed call.
     let again: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert_eq!(

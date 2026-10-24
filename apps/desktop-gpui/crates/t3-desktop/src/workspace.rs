@@ -19,13 +19,17 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(env: Entity<LocalEnvironment>, cx: &mut Context<Self>) -> Self {
+    pub fn new(env: Entity<LocalEnvironment>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), cx));
         let subscriptions = vec![
             cx.observe(&env, |_, _, cx| cx.notify()),
-            cx.subscribe(&sidebar, |this, _, event: &SidebarEvent, cx| match event {
-                SidebarEvent::SelectionChanged => this.open_selected(cx),
-            }),
+            cx.subscribe_in(
+                &sidebar,
+                window,
+                |this, _, event: &SidebarEvent, window, cx| match event {
+                    SidebarEvent::SelectionChanged => this.open_selected(window, cx),
+                },
+            ),
         ];
         Self {
             env,
@@ -35,11 +39,12 @@ impl Workspace {
         }
     }
 
-    fn open_selected(&mut self, cx: &mut Context<Self>) {
+    fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.sidebar.read(cx).selected().cloned();
         let current = self.thread.as_ref().map(|view| view.read(cx).thread_id());
         if selected.as_ref() != current {
-            self.thread = selected.map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, cx)));
+            self.thread =
+                selected.map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, window, cx)));
         }
         cx.notify();
     }

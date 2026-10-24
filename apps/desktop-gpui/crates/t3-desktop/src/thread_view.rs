@@ -13,6 +13,7 @@ use t3_client::thread::{
     self, Role, ThreadState, ThreadStreamItem, TimelineContent, TimelineEntry, WorkStatus,
 };
 
+use crate::composer::Composer;
 use crate::environment::LocalEnvironment;
 
 /// `subscribeDynamic` retries an expected failure after 250ms; backing off
@@ -35,6 +36,7 @@ pub struct ThreadView {
     state: ThreadState,
     rows: Rc<[Row]>,
     scroller: Entity<MessageScrollerState>,
+    composer: Entity<Composer>,
     error: Option<SharedString>,
     subscription: Option<Task<()>>,
     retry: Duration,
@@ -45,9 +47,12 @@ impl ThreadView {
     pub fn new(
         env: Entity<LocalEnvironment>,
         thread_id: SharedString,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        let composer = cx.new(|cx| Composer::new(env.clone(), thread_id.clone(), window, cx));
+        composer.update(cx, |composer, cx| composer.focus(window, cx));
         let observe = cx.observe(&env, |this, _, cx| this.ensure_subscribed(cx));
         let mut view = Self {
             env,
@@ -55,6 +60,7 @@ impl ThreadView {
             state: ThreadState::default(),
             rows: Rc::from([]),
             scroller,
+            composer,
             error: None,
             subscription: None,
             retry: RESUBSCRIBE_INITIAL,
@@ -289,30 +295,36 @@ fn first_line(text: &str) -> SharedString {
 impl Render for ThreadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        if self.state.projection.is_none() {
+        let timeline = if self.state.projection.is_none() {
             let message = self
                 .error
                 .clone()
                 .unwrap_or_else(|| "Loading thread…".into());
-            return v_flex()
+            v_flex()
                 .flex_1()
                 .items_center()
                 .justify_center()
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(message)
-                .into_any_element();
-        }
-        let rows = self.rows.clone();
-        MessageScroller::new(
-            SharedString::from(format!("thread-{}", self.thread_id)),
-            self.scroller.clone(),
-            move |ix, _, cx| render_row(&rows, ix, cx),
-        )
-        .with_row_style(StyleRefinement::default().pb_0())
-        .with_content_style(StyleRefinement::default().pt_6().pb_8())
-        .with_bottom_fade(theme.background)
-        .flex_1()
-        .into_any_element()
+                .into_any_element()
+        } else {
+            let rows = self.rows.clone();
+            MessageScroller::new(
+                SharedString::from(format!("thread-{}", self.thread_id)),
+                self.scroller.clone(),
+                move |ix, _, cx| render_row(&rows, ix, cx),
+            )
+            .with_row_style(StyleRefinement::default().pb_0())
+            .with_content_style(StyleRefinement::default().pt_6().pb_8())
+            .with_bottom_fade(theme.background)
+            .flex_1()
+            .into_any_element()
+        };
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .child(timeline)
+            .child(self.composer.clone())
     }
 }

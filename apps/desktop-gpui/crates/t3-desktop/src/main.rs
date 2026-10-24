@@ -1,4 +1,5 @@
 mod assets;
+mod composer;
 mod environment;
 mod format;
 mod launch;
@@ -46,8 +47,10 @@ fn main() -> anyhow::Result<()> {
                 app_id: Some("t3code".into()),
                 ..Default::default()
             };
-            gpui_kit::open_window(options, cx, |_, cx| cx.new(|cx| Workspace::new(env, cx)))
-                .expect("failed to open the main window");
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| Workspace::new(env, window, cx))
+            })
+            .expect("failed to open the main window");
             cx.activate(true);
         });
     Ok(())
