@@ -74,6 +74,13 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     for command in [
         t3_client::commands::stop_thread(missing),
         t3_client::commands::send_message(missing, "hello"),
+        t3_client::commands::respond_to_approval(missing, "request", "decline", Some("no")),
+        t3_client::commands::respond_to_user_input(
+            missing,
+            "request",
+            serde_json::Map::from_iter([("q".to_owned(), json!("answer"))]),
+        ),
+        t3_client::commands::dismiss_user_input(missing, "request"),
     ] {
         let rejected = t3_client::commands::dispatch(&client, &command)
             .await
