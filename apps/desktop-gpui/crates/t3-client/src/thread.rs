@@ -34,6 +34,25 @@ pub struct RunAttempt {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResponseCapability {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub supports_feedback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRequest {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub response_capability: ResponseCapability,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub id: String,
     pub kind: String,
@@ -99,6 +118,7 @@ pub struct ThreadProjection {
     pub runs: Vec<Run>,
     pub attempts: Vec<RunAttempt>,
     pub plans: Vec<Plan>,
+    pub runtime_requests: Vec<RuntimeRequest>,
     pub turn_items: Vec<TurnItem>,
     pub visible_turn_items: Vec<ProjectedTurnItem>,
 }
@@ -244,6 +264,15 @@ fn apply_event(
             };
             upsert(&mut projection.attempts, attempt, |attempt| &attempt.id);
             refresh_visibility(projection);
+            true
+        }
+        "runtime-request.updated" => {
+            let Ok(request) = serde_json::from_value::<RuntimeRequest>(event.payload) else {
+                return false;
+            };
+            upsert(&mut projection.runtime_requests, request, |request| {
+                &request.id
+            });
             true
         }
         "plan.updated" => {
@@ -841,6 +870,7 @@ mod tests {
                 "attempts": [],
                 "nodes": [],
                 "plans": [],
+                "runtimeRequests": [],
                 "messages": [],
                 "turnItems": items,
                 "visibleTurnItems": rows,

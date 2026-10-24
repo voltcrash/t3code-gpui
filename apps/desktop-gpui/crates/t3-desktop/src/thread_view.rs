@@ -9,6 +9,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use t3_client::requests::{self, PendingRequests};
 use t3_client::thread::{
     self, Role, ThreadState, ThreadStreamItem, TimelineContent, TimelineEntry, WorkStatus,
 };
@@ -35,6 +36,7 @@ pub struct ThreadView {
     thread_id: SharedString,
     state: ThreadState,
     rows: Rc<[Row]>,
+    pending: PendingRequests,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<Composer>,
     error: Option<SharedString>,
@@ -51,7 +53,8 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
-        let composer = cx.new(|cx| Composer::new(env.clone(), thread_id.clone(), window, cx));
+        let this = cx.entity();
+        let composer = cx.new(|cx| Composer::new(env.clone(), this, thread_id.clone(), window, cx));
         composer.update(cx, |composer, cx| composer.focus(window, cx));
         let observe = cx.observe(&env, |this, _, cx| this.ensure_subscribed(cx));
         let mut view = Self {
@@ -59,6 +62,7 @@ impl ThreadView {
             thread_id,
             state: ThreadState::default(),
             rows: Rc::from([]),
+            pending: PendingRequests::default(),
             scroller,
             composer,
             error: None,
@@ -68,6 +72,11 @@ impl ThreadView {
         };
         view.ensure_subscribed(cx);
         view
+    }
+
+    /// What the agent is waiting on the person for.
+    pub fn pending(&self) -> &PendingRequests {
+        &self.pending
     }
 
     pub fn thread_id(&self) -> &SharedString {
@@ -131,6 +140,9 @@ impl ThreadView {
         }
         self.error = None;
         self.retry = RESUBSCRIBE_INITIAL;
+        if let Some(projection) = &self.state.projection {
+            self.pending = requests::pending_requests(projection);
+        }
         self.rebuild_rows(cx);
         cx.notify();
     }
