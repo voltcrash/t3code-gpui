@@ -32,6 +32,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # GPUI links against the Wayland, X11, and font stacks.
+      - name: Install GPUI system libraries
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libx11-xcb-dev libfontconfig-dev libfreetype-dev libvulkan-dev
+
       - name: Setup Vite+
         uses: ./.github/actions/setup-ci-deps
 
