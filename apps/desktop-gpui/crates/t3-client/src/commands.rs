@@ -7,7 +7,7 @@
 //! `threadStop`, and the composer stays read-only against them.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{RpcClient, RpcError};
@@ -49,6 +49,52 @@ pub fn stop_thread(thread_id: &str) -> Value {
         "type": "thread.stop",
         "commandId": new_id(),
         "threadId": thread_id,
+    })
+}
+
+/// `respondToThreadApproval`. `feedback` goes with a decline the provider
+/// can explain to the agent.
+pub fn respond_to_approval(
+    thread_id: &str,
+    request_id: &str,
+    decision: &str,
+    feedback: Option<&str>,
+) -> Value {
+    let mut command = json!({
+        "type": "runtime-request.respond",
+        "commandId": new_id(),
+        "threadId": thread_id,
+        "requestId": request_id,
+        "decision": decision,
+    });
+    if let Some(feedback) = feedback {
+        command["feedback"] = feedback.into();
+    }
+    command
+}
+
+/// `respondToThreadUserInput`, keyed by question id.
+pub fn respond_to_user_input(
+    thread_id: &str,
+    request_id: &str,
+    answers: Map<String, Value>,
+) -> Value {
+    json!({
+        "type": "runtime-request.respond",
+        "commandId": new_id(),
+        "threadId": thread_id,
+        "requestId": request_id,
+        "answers": answers,
+    })
+}
+
+/// `dismissThreadUserInput`: closes an async question without answering it.
+pub fn dismiss_user_input(thread_id: &str, request_id: &str) -> Value {
+    json!({
+        "type": "thread.user-input.dismiss",
+        "commandId": new_id(),
+        "threadId": thread_id,
+        "requestId": request_id,
     })
 }
 
