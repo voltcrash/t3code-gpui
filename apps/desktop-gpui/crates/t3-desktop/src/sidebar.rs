@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::StyledExt;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -21,6 +22,7 @@ const ROW_HEIGHT: Pixels = px(36.);
 
 pub enum SidebarEvent {
     SelectionChanged,
+    NewThread,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -102,9 +104,15 @@ impl Sidebar {
         self.selected.as_ref()
     }
 
-    fn select(&mut self, id: SharedString, cx: &mut Context<Self>) {
+    pub fn select(&mut self, id: SharedString, cx: &mut Context<Self>) {
         self.selected = Some(id);
         cx.emit(SidebarEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    /// Drops the selection without announcing it, for a draft taking the pane.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
         cx.notify();
     }
 
@@ -342,14 +350,28 @@ impl Render for Sidebar {
                     .px_4()
                     .justify_between()
                     .child(div().text_sm().font_semibold().child("T3 Code"))
-                    .when_some(status, |header, status| {
-                        header.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(status),
-                        )
-                    }),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .when_some(status, |header, status| {
+                                header.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(status),
+                                )
+                            })
+                            .child(
+                                Button::new("new-thread")
+                                    .icon(Icon::new(Lucide::SquarePen))
+                                    .ghost()
+                                    .small()
+                                    .tooltip("New thread")
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::NewThread)),
+                                    ),
+                            ),
+                    ),
             )
             .child(
                 uniform_list(

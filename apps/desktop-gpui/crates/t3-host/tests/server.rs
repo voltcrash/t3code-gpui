@@ -93,6 +93,26 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         assert!(rejected.detail().contains(missing), "{rejected:?}");
     }
 
+    // New-thread defaults read the real settings and provider shapes.
+    let settings: Value = client.call("server.getSettings", &json!({})).await.unwrap();
+    serde_json::from_value::<t3_client::providers::Settings>(settings).unwrap();
+    assert_eq!(
+        t3_client::providers::from_config(&config).len(),
+        config["providers"].as_array().map_or(0, Vec::len),
+        "every provider snapshot decodes"
+    );
+    let (_, launch) = t3_client::commands::launch_thread(&t3_client::commands::NewThread {
+        project_id: "project-that-does-not-exist",
+        model_selection: &json!({ "instanceId": "codex", "model": "gpt-6-astra" }),
+        runtime_mode: "full-access",
+        text: "hello",
+    });
+    let rejected = client
+        .call::<_, Value>(t3_client::commands::LAUNCH_THREAD, &launch)
+        .await
+        .unwrap_err();
+    assert!(matches!(rejected, RpcError::Failure(_)), "{rejected:?}");
+
     // The socket survives an interrupted stream and a failed call.
     let again: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert_eq!(
