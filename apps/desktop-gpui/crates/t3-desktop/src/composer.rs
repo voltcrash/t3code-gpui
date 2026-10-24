@@ -17,6 +17,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::Value;
 use t3_client::commands;
+use t3_client::providers::NewThreadDefaults;
 use t3_client::requests::{
     self, Capability, Draft, PendingApproval, PendingRequests, PendingUserInput, Question,
 };
@@ -35,6 +36,7 @@ const CHOICE_PLACEHOLDER: &str = "Choose an option above";
 const ANSWER_PLACEHOLDER: &str =
     "Type your own answer, or leave this blank to use the selected option";
 const PROVIDER_GONE: &str = "Provider process is gone. Interrupt or restart the run to respond.";
+const NO_PROVIDER_PLACEHOLDER: &str = "Enable a provider in Settings to send a message";
 const MAX_WIDTH: Pixels = px(768.);
 
 /// The question whose answer the text box currently holds.
@@ -44,9 +46,30 @@ struct Binding {
     question_id: String,
 }
 
+/// Where a message goes: an existing thread, or a new one in a project.
+pub enum Target {
+    Thread(SharedString),
+    Draft(NewThread),
+}
+
+/// A draft's project and the defaults it launches with; `defaults` stays
+/// `None` while they load and when no provider can run.
+pub struct NewThread {
+    pub project_id: String,
+    pub defaults: Option<NewThreadDefaults>,
+    pub loaded: bool,
+}
+
+pub enum ComposerEvent {
+    /// The server created the draft's thread and took its first message.
+    Launched(SharedString),
+}
+
+impl EventEmitter<ComposerEvent> for Composer {}
+
 pub struct Composer {
     env: Entity<LocalEnvironment>,
-    thread_id: SharedString,
+    target: Target,
     input: Entity<TextareaState>,
     requests: PendingRequests,
     /// Per request, per question.
@@ -71,8 +94,8 @@ enum Mode<'a> {
 impl Composer {
     pub fn new(
         env: Entity<LocalEnvironment>,
-        thread: Entity<ThreadView>,
-        thread_id: SharedString,
+        target: Target,
+        thread: Option<&Entity<ThreadView>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,7 +105,7 @@ impl Composer {
                 .submit_on_enter(true)
                 .placeholder(PLACEHOLDER)
         });
-        let subscriptions =
+        let mut subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                     match event {
@@ -92,17 +115,19 @@ impl Composer {
                     }
                 }),
                 cx.observe_in(&env, window, |this, _, window, cx| this.sync(window, cx)),
-                cx.observe_in(&thread, window, |this, thread, window, cx| {
-                    let pending = thread.read(cx).pending();
-                    if *pending != this.requests {
-                        this.requests = pending.clone();
-                        this.sync(window, cx);
-                    }
-                }),
             ];
+        if let Some(thread) = thread {
+            subscriptions.push(cx.observe_in(thread, window, |this, thread, window, cx| {
+                let pending = thread.read(cx).pending();
+                if *pending != this.requests {
+                    this.requests = pending.clone();
+                    this.sync(window, cx);
+                }
+            }));
+        }
         let mut composer = Self {
             env,
-            thread_id,
+            target,
             input,
             requests: PendingRequests::default(),
             drafts: HashMap::new(),
@@ -116,6 +141,26 @@ impl Composer {
         };
         composer.sync(window, cx);
         composer
+    }
+
+    /// Updates a draft's project and defaults; a thread composer ignores it.
+    pub fn set_new_thread(
+        &mut self,
+        new_thread: NewThread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Target::Draft(_) = self.target {
+            self.target = Target::Draft(new_thread);
+            self.sync(window, cx);
+        }
+    }
+
+    fn thread_id(&self) -> Option<&str> {
+        match &self.target {
+            Target::Thread(id) => Some(id),
+            Target::Draft(_) => None,
+        }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -207,7 +252,12 @@ impl Composer {
                 Some(question) if !question.allows_custom_answer() => CHOICE_PLACEHOLDER,
                 _ => ANSWER_PLACEHOLDER,
             },
-            (_, _, Mode::Message) => PLACEHOLDER,
+            (_, _, Mode::Message) => match &self.target {
+                Target::Draft(draft) if draft.loaded && draft.defaults.is_none() => {
+                    NO_PROVIDER_PLACEHOLDER
+                }
+                _ => PLACEHOLDER,
+            },
         };
         if placeholder != self.placeholder {
             self.placeholder = placeholder;
@@ -237,16 +287,23 @@ impl Composer {
 
     fn can_send(&self, cx: &App) -> bool {
         let env = self.env.read(cx);
-        env.rpc.is_some() && env.commands_supported && !self.busy
+        let ready = match &self.target {
+            Target::Thread(_) => true,
+            Target::Draft(draft) => draft.defaults.is_some(),
+        };
+        env.rpc.is_some() && env.commands_supported && !self.busy && ready
     }
 
     /// Whether the thread has a turn to stop, as the shell reports it.
     fn is_running(&self, cx: &App) -> bool {
+        let Some(thread_id) = self.thread_id() else {
+            return false;
+        };
         self.env
             .read(cx)
             .shell
             .threads
-            .get(self.thread_id.as_ref())
+            .get(thread_id)
             .and_then(|thread| thread.runtime_status())
             .is_some_and(|status| {
                 matches!(
@@ -261,7 +318,26 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).value();
-        let thread = self.thread_id.to_string();
+        if let Target::Draft(draft) = &self.target {
+            let (Some(defaults), Mode::Message) = (&draft.defaults, self.mode()) else {
+                return;
+            };
+            if text.trim().is_empty() {
+                return;
+            }
+            let (thread_id, input) = commands::launch_thread(&commands::NewThread {
+                project_id: &draft.project_id,
+                model_selection: &defaults.model_selection,
+                runtime_mode: &defaults.runtime_mode,
+                text: &text,
+            });
+            let calls = vec![(commands::LAUNCH_THREAD, input)];
+            self.run(calls, true, Some(thread_id.into()), window, cx);
+            return;
+        }
+        let Some(thread) = self.thread_id().map(str::to_owned) else {
+            return;
+        };
         let commands = match self.mode() {
             Mode::Approval(approval) => {
                 if text.trim().is_empty() {
@@ -331,7 +407,7 @@ impl Composer {
             }
         };
         let clears_input = !matches!(self.mode(), Mode::Question(..));
-        self.run(commands, clears_input, window, cx);
+        self.dispatch(commands, clears_input, window, cx);
     }
 
     fn go_to_question(
@@ -370,33 +446,57 @@ impl Composer {
         if !self.can_send(cx) {
             return;
         }
-        let command = commands::respond_to_approval(&self.thread_id, &request_id, &decision, None);
-        self.run(vec![command], false, window, cx);
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        let command = commands::respond_to_approval(thread, &request_id, &decision, None);
+        self.dispatch(vec![command], false, window, cx);
     }
 
     fn dismiss(&mut self, request_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_send(cx) {
             return;
         }
-        let command = commands::dismiss_user_input(&self.thread_id, &request_id);
-        self.run(vec![command], false, window, cx);
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        let command = commands::dismiss_user_input(thread, &request_id);
+        self.dispatch(vec![command], false, window, cx);
     }
 
     fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_send(cx) {
             return;
         }
-        let command = commands::stop_thread(&self.thread_id);
-        self.run(vec![command], false, window, cx);
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        let command = commands::stop_thread(thread);
+        self.dispatch(vec![command], false, window, cx);
     }
 
-    /// Sends commands in order and stops at the first failure. A sent message
+    fn dispatch(
+        &mut self,
+        commands: Vec<Value>,
+        clears_input: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let calls = commands
+            .into_iter()
+            .map(|command| (commands::DISPATCH, command))
+            .collect();
+        self.run(calls, clears_input, None, window, cx);
+    }
+
+    /// Makes the calls in order and stops at the first failure. A sent message
     /// clears the box only once the server accepted it, so a failure keeps
     /// the text for another try.
     fn run(
         &mut self,
-        commands: Vec<Value>,
+        calls: Vec<(&'static str, Value)>,
         clears_input: bool,
+        launched: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -407,8 +507,8 @@ impl Composer {
         self.error = None;
         cx.notify();
         let dispatched = tokio_bridge::spawn(cx, async move {
-            for command in &commands {
-                commands::dispatch(&rpc, command).await?;
+            for (method, input) in &calls {
+                rpc.call::<_, Value>(method, input).await?;
             }
             Ok::<_, t3_client::RpcError>(())
         });
@@ -420,10 +520,14 @@ impl Composer {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
-                    Ok(()) if clears_input => {
-                        this.input.update(cx, |input, cx| input.clean(window, cx));
+                    Ok(()) => {
+                        if clears_input {
+                            this.input.update(cx, |input, cx| input.clean(window, cx));
+                        }
+                        if let Some(thread_id) = launched {
+                            cx.emit(ComposerEvent::Launched(thread_id));
+                        }
                     }
-                    Ok(()) => {}
                     Err(error) => {
                         tracing::warn!("command failed: {error}");
                         this.error = Some(error.into());

@@ -14,7 +14,7 @@ use t3_client::thread::{
     self, Role, ThreadState, ThreadStreamItem, TimelineContent, TimelineEntry, WorkStatus,
 };
 
-use crate::composer::Composer;
+use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
 
 /// `subscribeDynamic` retries an expected failure after 250ms; backing off
@@ -54,7 +54,15 @@ impl ThreadView {
     ) -> Self {
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
         let this = cx.entity();
-        let composer = cx.new(|cx| Composer::new(env.clone(), this, thread_id.clone(), window, cx));
+        let composer = cx.new(|cx| {
+            Composer::new(
+                env.clone(),
+                Target::Thread(thread_id.clone()),
+                Some(&this),
+                window,
+                cx,
+            )
+        });
         composer.update(cx, |composer, cx| composer.focus(window, cx));
         let observe = cx.observe(&env, |this, _, cx| this.ensure_subscribed(cx));
         let mut view = Self {

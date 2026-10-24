@@ -1,5 +1,6 @@
 mod assets;
 mod composer;
+mod draft_view;
 mod environment;
 mod format;
 mod launch;
@@ -34,6 +35,7 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.set_global(Tokio(runtime));
+            workspace::bind_keys(cx);
             Theme::sync_system_appearance(None, cx);
 
             let env = cx.new(|cx| LocalEnvironment::start(launch, cx));
