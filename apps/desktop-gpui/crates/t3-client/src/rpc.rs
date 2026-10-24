@@ -60,6 +60,17 @@ impl RpcError {
             _ => None,
         }
     }
+
+    /// A sentence for the person: a typed failure's `detail` or `message`.
+    pub fn detail(&self) -> String {
+        match self {
+            RpcError::Failure(error) => ["detail", "message"]
+                .iter()
+                .find_map(|field| error.get(field).and_then(Value::as_str))
+                .map_or_else(|| self.to_string(), str::to_owned),
+            _ => self.to_string(),
+        }
+    }
 }
 
 enum Reply {
