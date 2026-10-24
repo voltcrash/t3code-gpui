@@ -3,6 +3,7 @@ mod environment;
 mod format;
 mod launch;
 mod sidebar;
+mod thread_view;
 mod tokio_bridge;
 mod workspace;
 

@@ -6,5 +6,6 @@ pub mod auth;
 pub mod bootstrap_token;
 pub mod rpc;
 pub mod shell;
+pub mod thread;
 
 pub use rpc::{RpcClient, RpcError, Subscription};
