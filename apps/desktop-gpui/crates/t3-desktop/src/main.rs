@@ -1,5 +1,6 @@
 mod assets;
 mod composer;
+mod desktop;
 mod draft_view;
 mod environment;
 mod format;
@@ -10,12 +11,9 @@ mod tokio_bridge;
 mod workspace;
 
 use gpui_kit::component::Theme;
-use gpui_kit::*;
 use tracing_subscriber::EnvFilter;
 
-use crate::environment::LocalEnvironment;
 use crate::tokio_bridge::Tokio;
-use crate::workspace::Workspace;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -30,30 +28,15 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
-    gpui_kit::application()
-        .with_assets(assets::AppAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            cx.set_global(Tokio(runtime));
-            workspace::bind_keys(cx);
-            Theme::sync_system_appearance(None, cx);
+    let app = gpui_kit::application().with_assets(assets::AppAssets);
+    app.on_reopen(desktop::activate);
+    app.run(move |cx| {
+        gpui_kit::init(cx);
+        cx.set_global(Tokio(runtime));
+        workspace::bind_keys(cx);
+        Theme::sync_system_appearance(None, cx);
 
-            let env = cx.new(|cx| LocalEnvironment::start(launch, cx));
-            let options = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("T3 Code".into()),
-                    ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-                window_min_size: Some(size(px(640.), px(420.))),
-                app_id: Some("t3code".into()),
-                ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Workspace::new(env, window, cx))
-            })
-            .expect("failed to open the main window");
-            cx.activate(true);
-        });
+        desktop::init(launch, cx);
+    });
     Ok(())
 }

@@ -1,12 +1,17 @@
 //! The window's root: sidebar beside the open thread or a new-thread draft.
 
 use gpui_kit::component::StyledExt;
+use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use t3_client::shell::timestamp_ms;
 
+use crate::desktop::{
+    self, About, CloseWindow, Maximize, Minimize, PasteAsText, ResetZoom, ToggleFullscreen, ZoomIn,
+    ZoomOut,
+};
 use crate::draft_view::{DraftEvent, DraftView};
 use crate::environment::{ConnectionState, LocalEnvironment};
 use crate::sidebar::{Sidebar, SidebarEvent};
@@ -26,6 +31,9 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub struct Workspace {
+    focus: FocusHandle,
+    zoom: f32,
+    menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
     sidebar: Entity<Sidebar>,
     thread: Option<Entity<ThreadView>>,
@@ -48,6 +56,9 @@ impl Workspace {
             ),
         ];
         Self {
+            focus: cx.focus_handle(),
+            zoom: 1.,
+            menu: AppMenuBar::new(cx),
             env,
             sidebar,
             thread: None,
@@ -243,23 +254,61 @@ impl Workspace {
     }
 }
 
+impl Focusable for Workspace {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        window.set_rem_size(theme.font_size * self.zoom);
         div()
+            .track_focus(&self.focus)
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Maximize, window, _| window.zoom_window())
+            .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
+            .on_action(|_: &About, window, cx| desktop::about(window, cx))
+            .on_action(|_: &PasteAsText, window, cx| {
+                window.dispatch_action(Box::new(gpui_kit::component::input::Paste), cx);
+            })
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom = (this.zoom * 1.2).min(3.);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom = (this.zoom / 1.2).max(0.5);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
+                this.zoom = 1.;
+                cx.notify();
+            }))
             .flex()
+            .flex_col()
             .size_full()
             .text_color(theme.foreground)
             .font_family(theme.font_family.clone())
+            .when(!cfg!(target_os = "macos"), |root| {
+                root.child(div().h_8().flex_none().child(self.menu.clone()))
+            })
             .child(
-                div()
-                    .w(SIDEBAR_WIDTH)
-                    .h_full()
-                    .flex_none()
-                    .child(self.sidebar.clone()),
+                h_flex()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .w(SIDEBAR_WIDTH)
+                            .h_full()
+                            .flex_none()
+                            .child(self.sidebar.clone()),
+                    )
+                    .child(self.render_main(cx)),
             )
-            .child(self.render_main(cx))
     }
 }
