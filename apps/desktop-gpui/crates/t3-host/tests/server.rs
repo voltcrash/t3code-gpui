@@ -208,6 +208,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         "approval-required"
     );
     drop(thread_updates);
+    verifies_thread_lifecycle(&client, thread_id).await;
     assert_eq!(
         t3_client::providers::from_config(&config).len(),
         config["providers"].as_array().map_or(0, Vec::len),
@@ -303,4 +304,59 @@ async fn verifies_project_lifecycle(client: &RpcClient, home: &std::path::Path) 
         shell.apply(updates.next().await.unwrap().unwrap());
     }
     assert!(root.join("README.md").is_file());
+}
+
+async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
+    use t3_client::thread_actions::Action;
+    let mut updates =
+        client.subscribe::<_, ShellStreamItem>(t3_client::shell::SUBSCRIBE, &json!({}));
+    let mut archive_updates = client.subscribe::<_, t3_client::archives::StreamItem>(
+        t3_client::archives::SUBSCRIBE,
+        &json!({}),
+    );
+    let mut archive = t3_client::archives::State::default();
+    archive.apply(archive_updates.next().await.unwrap().unwrap());
+    let mut shell = ShellState::default();
+    shell.apply(updates.next().await.unwrap().unwrap());
+    for action in [
+        Action::Rename("Renamed native thread".into()),
+        Action::Pin,
+        Action::Unpin,
+        Action::Settle,
+        Action::Unsettle,
+        Action::Archive,
+        Action::Rename("Renamed archived thread".into()),
+        Action::Restore,
+        Action::Archive,
+        Action::Delete,
+    ] {
+        t3_client::commands::dispatch(client, &action.command(id))
+            .await
+            .unwrap();
+        loop {
+            tokio::select! {
+                item = updates.next() => { shell.apply(item.unwrap().unwrap()); },
+                item = archive_updates.next() => { archive.apply(item.unwrap().unwrap()); },
+            }
+            let active = shell.threads.get(id);
+            let archived = archive.threads.get(id);
+            let applied = match &action {
+                Action::Rename(title) => active
+                    .or(archived)
+                    .is_some_and(|thread| thread.title == *title),
+                Action::Pin => active.is_some_and(|thread| thread.pinned_at.is_some()),
+                Action::Unpin => active.is_some_and(|thread| thread.pinned_at.is_none()),
+                Action::Settle => active
+                    .is_some_and(|thread| thread.settled_override.as_deref() == Some("settled")),
+                Action::Unsettle => active
+                    .is_some_and(|thread| thread.settled_override.as_deref() == Some("active")),
+                Action::Archive => active.is_none() && archived.is_some(),
+                Action::Restore => active.is_some() && archived.is_none(),
+                Action::Delete => active.is_none() && archived.is_none(),
+            };
+            if applied {
+                break;
+            }
+        }
+    }
 }

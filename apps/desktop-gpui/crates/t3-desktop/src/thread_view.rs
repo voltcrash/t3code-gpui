@@ -64,7 +64,10 @@ impl ThreadView {
             )
         });
         composer.update(cx, |composer, cx| composer.focus(window, cx));
-        let observe = cx.observe(&env, |this, _, cx| this.ensure_subscribed(cx));
+        let observe = cx.observe(&env, |this, _, cx| {
+            this.ensure_subscribed(cx);
+            cx.notify();
+        });
         let mut view = Self {
             env,
             thread_id,
@@ -321,6 +324,11 @@ fn first_line(text: &str) -> SharedString {
 impl Render for ThreadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let archived = self
+            .env
+            .read(cx)
+            .thread(self.thread_id.as_ref())
+            .is_some_and(|thread| thread.archived_at.is_some());
         let timeline = if self.state.projection.is_none() {
             let message = self
                 .error
@@ -351,6 +359,17 @@ impl Render for ThreadView {
             .size_full()
             .min_h_0()
             .child(timeline)
-            .child(self.composer.clone())
+            .when(!archived, |column| column.child(self.composer.clone()))
+            .when(archived, |column| {
+                column.child(
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            "This thread is archived. Restore it from Thread actions to continue.",
+                        ),
+                )
+            })
     }
 }

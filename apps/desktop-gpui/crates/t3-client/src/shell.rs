@@ -58,6 +58,7 @@ pub struct ThreadShell {
     pub status: String,
     pub activity_run_status: Option<String>,
     pub latest_run_id: Option<String>,
+    pub active_run_id: Option<String>,
     pub latest_run_requested_at: Option<String>,
     pub latest_run_started_at: Option<String>,
     /// Outer `None` means an older server omitted the field.
