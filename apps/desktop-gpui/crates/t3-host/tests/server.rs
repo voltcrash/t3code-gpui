@@ -6,6 +6,8 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use t3_client::auth::{self, ClientMetadata};
+use t3_client::config::{ConfigStreamItem, ServerState};
+use t3_client::thread::{ThreadState, ThreadStreamItem};
 use t3_client::{RpcClient, RpcError};
 use t3_host::{Backend, BackendLaunch};
 
@@ -57,10 +59,11 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         "{config}"
     );
 
-    let mut updates = client.subscribe::<_, Value>("subscribeServerConfig", &json!({}));
+    let mut updates = client.subscribe::<_, ConfigStreamItem>("subscribeServerConfig", &json!({}));
     let first = updates.next().await.unwrap().unwrap();
-    assert_eq!(first["type"], "snapshot");
-    drop(updates);
+    assert!(matches!(first, ConfigStreamItem::Snapshot { .. }));
+    let mut server = ServerState::default();
+    server.apply(first);
 
     let unknown = client
         .call::<_, Value>("no.such.method", &json!({}))
@@ -73,7 +76,12 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     let missing = "thread-that-does-not-exist";
     for command in [
         t3_client::commands::stop_thread(missing),
-        t3_client::commands::send_message(missing, "hello"),
+        t3_client::commands::send_message(
+            missing,
+            "hello",
+            Some(&json!({ "instanceId": "codex", "model": "gpt-6-astra" })),
+        ),
+        t3_client::commands::set_runtime_mode(missing, "approval-required"),
         t3_client::commands::respond_to_approval(missing, "request", "decline", Some("no")),
         t3_client::commands::respond_to_user_input(
             missing,
@@ -96,6 +104,108 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     // New-thread defaults read the real settings and provider shapes.
     let settings: Value = client.call("server.getSettings", &json!({})).await.unwrap();
     serde_json::from_value::<t3_client::providers::Settings>(settings).unwrap();
+    client
+        .call::<_, Value>(
+            "server.updateSettings",
+            &json!({
+                "patch": { "defaultRuntimeMode": "approval-required" },
+            }),
+        )
+        .await
+        .unwrap();
+    while let Some(item) = updates.next().await {
+        let item = item.unwrap();
+        let settings_updated = matches!(item, ConfigStreamItem::SettingsUpdated { .. });
+        server.apply(item);
+        if settings_updated {
+            break;
+        }
+    }
+    assert_eq!(
+        server
+            .settings
+            .as_ref()
+            .unwrap()
+            .default_runtime_mode
+            .as_deref(),
+        Some("approval-required")
+    );
+    drop(updates);
+
+    // Change a real thread's mode and await its persisted event, without
+    // starting a provider process or sending a prompt.
+    let project: Value = client
+        .call(
+            "projects.mutate",
+            &json!({
+                "type": "project.create", "commandId": "create-mode-project",
+                "projectId": "mode-project", "title": "Mode test",
+                "workspaceRoot": home.join("project"), "createWorkspaceRootIfMissing": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let thread_id = "mode-test-thread";
+    t3_client::commands::dispatch(
+        &client,
+        &json!({
+            "type": "thread.create", "commandId": "create-mode-test",
+            "threadId": thread_id, "projectId": project["id"],
+            "createdBy": "user", "creationSource": "web", "title": "Mode test",
+            "modelSelection": { "instanceId": "codex", "model": "gpt-6-astra" },
+            "runtimeMode": "full-access", "interactionMode": "default",
+            "branch": null, "worktreePath": null,
+        }),
+    )
+    .await
+    .unwrap();
+    let mut thread_updates = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &json!({ "threadId": thread_id }),
+    );
+    let mut thread = ThreadState::default();
+    thread.apply(thread_updates.next().await.unwrap().unwrap());
+    assert_eq!(
+        thread
+            .projection
+            .as_ref()
+            .unwrap()
+            .settings()
+            .unwrap()
+            .runtime_mode,
+        "full-access"
+    );
+    t3_client::commands::dispatch(
+        &client,
+        &t3_client::commands::set_runtime_mode(thread_id, "approval-required"),
+    )
+    .await
+    .unwrap();
+    while let Some(item) = thread_updates.next().await {
+        thread.apply(item.unwrap());
+        if thread
+            .projection
+            .as_ref()
+            .unwrap()
+            .settings()
+            .unwrap()
+            .runtime_mode
+            == "approval-required"
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        thread
+            .projection
+            .as_ref()
+            .unwrap()
+            .settings()
+            .unwrap()
+            .runtime_mode,
+        "approval-required"
+    );
+    drop(thread_updates);
     assert_eq!(
         t3_client::providers::from_config(&config).len(),
         config["providers"].as_array().map_or(0, Vec::len),

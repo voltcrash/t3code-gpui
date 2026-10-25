@@ -82,6 +82,12 @@ impl ThreadView {
         view
     }
 
+    /// The model and runtime mode the next turn runs with unless the
+    /// composer picks others.
+    pub fn settings(&self) -> Option<thread::ThreadSettings> {
+        self.state.projection.as_ref()?.settings()
+    }
+
     /// What the agent is waiting on the person for.
     pub fn pending(&self) -> &PendingRequests {
         &self.pending
