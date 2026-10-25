@@ -23,6 +23,7 @@ const ROW_HEIGHT: Pixels = px(36.);
 pub enum SidebarEvent {
     SelectionChanged,
     NewThread,
+    AddProject,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -361,6 +362,19 @@ impl Render for Sidebar {
                                         .child(status),
                                 )
                             })
+                            .child(
+                                Button::new("add-project")
+                                    .accessibility_label("Add project")
+                                    .icon(Icon::new(Lucide::FolderPlus))
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Add project")
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| {
+                                            cx.emit(SidebarEvent::AddProject)
+                                        }),
+                                    ),
+                            )
                             .child(
                                 Button::new("new-thread")
                                     .icon(Icon::new(Lucide::SquarePen))

@@ -13,6 +13,7 @@ use crate::environment::LocalEnvironment;
 
 pub enum DraftEvent {
     Launched(SharedString),
+    AddProject,
 }
 
 impl EventEmitter<DraftEvent> for DraftView {}
@@ -151,7 +152,11 @@ impl Render for DraftView {
                             }),
                     );
                 }
-                menu
+                let this = this.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("Add project").on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |_, cx| cx.emit(DraftEvent::AddProject));
+                    }))
             });
 
         let summary: SharedString = match (&self.defaults, self.loaded) {
