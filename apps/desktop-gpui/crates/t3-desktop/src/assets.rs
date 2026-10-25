@@ -7,7 +7,9 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [Pin, AlarmClock, GitBranch, ArrowUp, Square, SquarePen]
+    [
+        Pin, AlarmClock, GitBranch, ArrowUp, Square, SquarePen, FolderPlus, Trash, X
+    ]
 );
 
 pub struct AppAssets;

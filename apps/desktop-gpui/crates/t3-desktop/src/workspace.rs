@@ -14,8 +14,11 @@ use crate::desktop::{
 };
 use crate::draft_view::{DraftEvent, DraftView};
 use crate::environment::{ConnectionState, LocalEnvironment};
+use crate::project_picker::{ProjectEvent, ProjectPicker};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::thread_view::ThreadView;
+use gpui_kit::component::Sizable;
+use gpui_kit::component::button::{Button, ButtonVariants};
 
 const SIDEBAR_WIDTH: Pixels = px(280.);
 const CONTEXT: &str = "Workspace";
@@ -38,6 +41,9 @@ pub struct Workspace {
     sidebar: Entity<Sidebar>,
     thread: Option<Entity<ThreadView>>,
     draft: Option<(Entity<DraftView>, Subscription)>,
+    project_picker: Option<(Entity<ProjectPicker>, Subscription)>,
+    pending_project: Option<String>,
+    project_notice: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -45,13 +51,39 @@ impl Workspace {
     pub fn new(env: Entity<LocalEnvironment>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), cx));
         let subscriptions = vec![
-            cx.observe(&env, |_, _, cx| cx.notify()),
+            cx.observe_in(&env, window, |this, env, window, cx| {
+                let env = env.read(cx);
+                let missing_draft = this.draft.as_ref().is_some_and(|(draft, _)| {
+                    env.shell.project(draft.read(cx).project_id()).is_none()
+                });
+                let missing_thread = this.sidebar.read(cx).selected().is_some_and(|id| {
+                    !env.shell.threads.contains_key(id.as_ref())
+                        && !env.shell.archived.contains_key(id.as_ref())
+                });
+                let ready = this
+                    .pending_project
+                    .clone()
+                    .filter(|id| env.shell.project(id).is_some());
+                if missing_draft {
+                    this.draft = None;
+                }
+                if missing_thread {
+                    this.thread = None;
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.clear_selection(cx));
+                }
+                if let Some(id) = ready {
+                    this.open_project(id, window, cx);
+                }
+                cx.notify();
+            }),
             cx.subscribe_in(
                 &sidebar,
                 window,
                 |this, _, event: &SidebarEvent, window, cx| match event {
                     SidebarEvent::SelectionChanged => this.open_selected(window, cx),
                     SidebarEvent::NewThread => this.new_thread(window, cx),
+                    SidebarEvent::AddProject => this.add_project(window, cx),
                 },
             ),
         ];
@@ -63,6 +95,9 @@ impl Workspace {
             sidebar,
             thread: None,
             draft: None,
+            project_picker: None,
+            pending_project: None,
+            project_notice: None,
             _subscriptions: subscriptions,
         }
     }
@@ -70,6 +105,9 @@ impl Workspace {
     /// Opens a draft in the open thread's project, else the draft's own,
     /// else the most recently active one.
     fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_picker = None;
+        self.pending_project = None;
+        self.project_notice = None;
         let env = self.env.read(cx);
         let project_id = self
             .thread
@@ -93,21 +131,26 @@ impl Workspace {
             })
             .or_else(|| env.shell.projects.first().map(|project| project.id.clone()));
         let Some(project_id) = project_id else {
+            self.add_project(window, cx);
             return;
         };
+        self.open_draft(project_id, window, cx);
+    }
+
+    fn open_draft(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let draft = cx.new(|cx| DraftView::new(self.env.clone(), project_id, window, cx));
-        let subscription =
-            cx.subscribe_in(
-                &draft,
-                window,
-                |this, _, event: &DraftEvent, _, cx| match event {
-                    DraftEvent::Launched(thread_id) => {
-                        let thread_id = thread_id.clone();
-                        this.sidebar
-                            .update(cx, |sidebar, cx| sidebar.select(thread_id, cx));
-                    }
-                },
-            );
+        let subscription = cx.subscribe_in(
+            &draft,
+            window,
+            |this, _, event: &DraftEvent, window, cx| match event {
+                DraftEvent::Launched(thread_id) => {
+                    let thread_id = thread_id.clone();
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.select(thread_id, cx));
+                }
+                DraftEvent::AddProject => this.add_project(window, cx),
+            },
+        );
         self.thread = None;
         self.draft = Some((draft, subscription));
         self.sidebar
@@ -115,7 +158,77 @@ impl Workspace {
         cx.notify();
     }
 
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_picker.is_some() {
+            return;
+        }
+        let env = self.env.read(cx);
+        let cwd = self
+            .draft
+            .as_ref()
+            .and_then(|(draft, _)| env.shell.project(draft.read(cx).project_id()))
+            .or_else(|| {
+                self.sidebar
+                    .read(cx)
+                    .selected()
+                    .and_then(|id| env.shell.threads.get(id.as_ref()))
+                    .and_then(|thread| env.shell.project(&thread.project_id))
+            })
+            .map(|project| project.workspace_root.clone());
+        let picker = cx.new(|cx| ProjectPicker::new(self.env.clone(), cwd, window, cx));
+        let subscription = cx.subscribe_in(
+            &picker,
+            window,
+            |this, _, event: &ProjectEvent, window, cx| {
+                match event {
+                    ProjectEvent::Closed => {
+                        this.project_picker = None;
+                    }
+                    ProjectEvent::Opened(id, warning) => {
+                        this.project_notice = warning.as_ref().map(|warning| {
+                            format!("Project created without a first commit: {warning}").into()
+                        });
+                        this.open_project(id.clone(), window, cx);
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.pending_project = None;
+        self.project_picker = Some((picker, subscription));
+        cx.notify();
+    }
+
+    fn open_project(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_picker = None;
+        let env = self.env.read(cx);
+        if env.shell.project(&project_id).is_none() {
+            // The reply can beat the committed project event. Open the draft
+            // only after its project reaches the shared shell projection.
+            self.pending_project = Some(project_id);
+            cx.notify();
+            return;
+        }
+        let latest = env
+            .shell
+            .threads
+            .values()
+            .filter(|thread| thread.project_id == project_id)
+            .max_by_key(|thread| timestamp_ms(Some(&thread.updated_at)))
+            .filter(|thread| thread.settled_override.as_deref() != Some("settled"))
+            .map(|thread| SharedString::from(thread.id.clone()));
+        self.pending_project = None;
+        if let Some(id) = latest {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.select(id, cx));
+        } else {
+            self.open_draft(project_id, window, cx);
+        }
+    }
+
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_picker = None;
+        self.pending_project = None;
         let selected = self.sidebar.read(cx).selected().cloned();
         if selected.is_some() {
             self.draft = None;
@@ -128,7 +241,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn render_main(&self, cx: &App) -> AnyElement {
+    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let env = self.env.read(cx);
         let thread = self.sidebar.read(cx).selected().and_then(|id| {
@@ -213,6 +326,9 @@ impl Workspace {
                             .child(error.clone()),
                     ),
             ),
+            (_, _) if self.pending_project.is_some() => {
+                centered(div().text_sm().child("Opening project…"))
+            }
             (_, _) if self.draft.is_some() => v_flex()
                 .flex_1()
                 .min_h_0()
@@ -223,6 +339,32 @@ impl Workspace {
                 .min_h_0()
                 .child(view.clone())
                 .into_any_element(),
+            (_, None) if env.shell.projects.is_empty() => centered(
+                v_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_medium()
+                            .child("What should we work on?"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("Add a project to start your first thread."),
+                    )
+                    .child(
+                        Button::new("empty-add-project")
+                            .label("Add project")
+                            .primary()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_project(window, cx)),
+                            ),
+                    ),
+            ),
             (_, None) => centered(
                 v_flex()
                     .items_center()
@@ -249,6 +391,26 @@ impl Workspace {
             .h_full()
             .bg(theme.background)
             .child(header)
+            .when_some(self.project_notice.clone(), |column, notice| {
+                column.child(
+                    h_flex()
+                        .px_4()
+                        .py_2()
+                        .gap_2()
+                        .text_xs()
+                        .child(div().flex_1().child(notice))
+                        .child(
+                            Button::new("dismiss-project-notice")
+                                .label("Dismiss")
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.project_notice = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .child(body)
             .into_any_element()
     }
@@ -266,6 +428,7 @@ impl Render for Workspace {
         window.set_rem_size(theme.font_size * self.zoom);
         div()
             .track_focus(&self.focus)
+            .relative()
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -310,5 +473,25 @@ impl Render for Workspace {
                     )
                     .child(self.render_main(cx)),
             )
+            .children(self.project_picker.as_ref().map(|(picker, _)| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            if let Some((picker, _)) = &this.project_picker {
+                                picker.update(cx, |picker, cx| picker.close(window, cx));
+                            }
+                        }),
+                    )
+                    .bg(cx.theme().background.opacity(0.7))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_4()
+                    .child(picker.clone())
+            }))
     }
 }

@@ -7,6 +7,8 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use t3_client::auth::{self, ClientMetadata};
 use t3_client::config::{ConfigStreamItem, ServerState};
+use t3_client::projects;
+use t3_client::shell::{ShellState, ShellStreamItem};
 use t3_client::thread::{ThreadState, ThreadStreamItem};
 use t3_client::{RpcClient, RpcError};
 use t3_host::{Backend, BackendLaunch};
@@ -223,6 +225,8 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         .unwrap_err();
     assert!(matches!(rejected, RpcError::Failure(_)), "{rejected:?}");
 
+    verifies_project_lifecycle(&client, &home).await;
+
     // The socket survives an interrupted stream and a failed call.
     let again: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert_eq!(
@@ -233,4 +237,70 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_project_lifecycle(client: &RpcClient, home: &std::path::Path) {
+    let config = projects::config(client).await.unwrap();
+    assert!(!config.platform.is_empty());
+    assert!(config.new_projects_root.is_some());
+    let folder = home.join("folder-fixture");
+    std::fs::create_dir_all(folder.join("child")).unwrap();
+    std::fs::create_dir_all(folder.join(".hidden")).unwrap();
+    std::fs::write(folder.join("file.txt"), "keep me").unwrap();
+    let folders = projects::browse(
+        client,
+        &projects::directory(&folder.to_string_lossy()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        folders
+            .entries
+            .iter()
+            .map(|folder| folder.name.as_str())
+            .collect::<Vec<_>>(),
+        [".hidden", "child"]
+    );
+
+    let mut updates =
+        client.subscribe::<_, ShellStreamItem>(t3_client::shell::SUBSCRIBE, &json!({}));
+    let mut shell = ShellState::default();
+    shell.apply(updates.next().await.unwrap().unwrap());
+    let registered = projects::add(client, &folder.to_string_lossy())
+        .await
+        .unwrap();
+    assert_eq!(registered.title, "folder-fixture");
+    while shell.project(&registered.id).is_none() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    let duplicate = projects::add(client, &folder.to_string_lossy())
+        .await
+        .unwrap_err();
+    assert!(matches!(duplicate, RpcError::Failure(_)), "{duplicate:?}");
+    projects::remove(client, &registered.id).await.unwrap();
+    while shell.project(&registered.id).is_some() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert_eq!(
+        std::fs::read_to_string(folder.join("file.txt")).unwrap(),
+        "keep me"
+    );
+
+    let created = projects::create(client, "Native project").await.unwrap();
+    while shell.project(&created.project_id).is_none() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert_eq!(
+        shell.project(&created.project_id).unwrap().title,
+        "Native project"
+    );
+    let root = PathBuf::from(&created.workspace_root);
+    assert!(root.join(".git").is_dir());
+    assert!(root.join("README.md").is_file());
+    projects::remove(client, &created.project_id).await.unwrap();
+    while shell.project(&created.project_id).is_some() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert!(root.join("README.md").is_file());
 }

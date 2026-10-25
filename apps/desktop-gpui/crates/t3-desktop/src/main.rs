@@ -5,6 +5,7 @@ mod draft_view;
 mod environment;
 mod format;
 mod launch;
+mod project_picker;
 mod sidebar;
 mod thread_view;
 mod tokio_bridge;
