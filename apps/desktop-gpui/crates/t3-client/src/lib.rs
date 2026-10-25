@@ -7,6 +7,7 @@ pub mod auth;
 pub mod bootstrap_token;
 pub mod commands;
 pub mod config;
+pub mod history;
 pub mod projects;
 pub mod providers;
 pub mod requests;
