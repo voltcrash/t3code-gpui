@@ -2,6 +2,8 @@
 //! did in `apps/desktop/src/backend`. The server is unchanged: it receives the
 //! same `DesktopBackendBootstrap` envelope (`packages/contracts/src/desktopBootstrap.ts`).
 
+pub mod preferences;
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};

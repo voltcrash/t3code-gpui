@@ -23,7 +23,8 @@ actions!(
         About,
         Hide,
         HideOthers,
-        ShowAll
+        ShowAll,
+        OpenSettings
     ]
 );
 
@@ -43,6 +44,7 @@ pub fn init(launch: BackendLaunch, cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([
         KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("secondary-w", CloseWindow, None),
         KeyBinding::new("secondary-=", ZoomIn, None),
         KeyBinding::new("secondary-+", ZoomIn, None),
@@ -108,6 +110,8 @@ pub fn activate(cx: &mut App) {
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
+        let appearance = crate::preferences::global(cx).read(cx).value.appearance;
+        crate::preferences::apply_appearance(appearance, Some(window), cx);
         let workspace = cx.new(|cx| Workspace::new(env, window, cx));
         workspace.read(cx).focus_handle(cx).focus(window, cx);
         workspace
@@ -140,6 +144,7 @@ fn menus() -> Vec<Menu> {
     if cfg!(target_os = "macos") {
         menus.push(Menu::new("T3 Code").items([
             MenuItem::action("About T3 Code", About),
+            MenuItem::action("Settings...", OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -150,16 +155,20 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Quit T3 Code", Quit),
         ]));
     }
-    menus.extend([
-        Menu::new("File").items([
-            MenuItem::action("New Thread", NewThread),
+    let mut file_items = vec![MenuItem::action("New Thread", NewThread)];
+    if !cfg!(target_os = "macos") {
+        file_items.extend([
+            MenuItem::action("Settings...", OpenSettings),
             MenuItem::separator(),
-            if cfg!(target_os = "macos") {
-                MenuItem::action("Close Window", CloseWindow)
-            } else {
-                MenuItem::action("Quit", Quit)
-            },
-        ]),
+        ]);
+    }
+    file_items.push(if cfg!(target_os = "macos") {
+        MenuItem::action("Close Window", CloseWindow)
+    } else {
+        MenuItem::action("Quit", Quit)
+    });
+    menus.extend([
+        Menu::new("File").items(file_items),
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", Undo, OsAction::Undo),
             MenuItem::os_action("Redo", Redo, OsAction::Redo),
