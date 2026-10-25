@@ -7,6 +7,8 @@
 //! `resolveProjectProviderInstanceEnabled` in `packages/contracts/src/settings.ts`.
 //! Keep them in step.
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -100,6 +102,8 @@ pub struct Provider {
     #[serde(default)]
     pub models: Vec<ProviderModel>,
     pub supported_runtime_modes: Option<Vec<String>>,
+    #[serde(default)]
+    pub requires_new_thread_for_model_change: bool,
 }
 
 impl Provider {
@@ -167,6 +171,8 @@ pub fn from_config(config: &Value) -> Vec<Provider> {
 pub struct Settings {
     #[serde(default)]
     pub provider_instances: Map<String, Value>,
+    #[serde(default)]
+    pub provider_model_preferences: Option<Map<String, Value>>,
     #[serde(default)]
     pub project_settings_overrides: Map<String, Value>,
     pub default_model_selection: Option<Value>,
@@ -251,21 +257,8 @@ pub fn new_thread_defaults(
     project: &ProjectDefaults,
 ) -> Option<NewThreadDefaults> {
     // `applyProviderInstanceSettings` then `sortProviderInstanceEntries`.
-    let mut kinds: Vec<&str> = Vec::new();
-    for provider in providers {
-        if !kinds.contains(&provider.driver.as_str()) {
-            kinds.push(&provider.driver);
-        }
-    }
-    let entries: Vec<(&Provider, bool)> = kinds
-        .iter()
-        .flat_map(|kind| {
-            let bucket = providers.iter().filter(move |p| p.driver == *kind);
-            bucket
-                .clone()
-                .filter(|p| p.is_default_instance())
-                .chain(bucket.filter(|p| !p.is_default_instance()))
-        })
+    let entries: Vec<(&Provider, bool)> = sorted(providers)
+        .into_iter()
         .map(|provider| {
             (
                 provider,
@@ -374,6 +367,199 @@ fn first_selectable<'a>(
                 .find(|entry| selectable(entry) && entry.0.status != "error")
         })
         .copied()
+}
+
+/// `runtimeModeConfig` in `apps/web/src/components/chat/runtimeModeConfig.ts`.
+pub fn runtime_mode_label(mode: &str) -> (&'static str, &'static str) {
+    match mode {
+        "approval-required" => ("Supervised", "Ask before commands and file changes."),
+        "auto-accept-edits" => (
+            "Auto-accept edits",
+            "Auto-approve edits, ask before other actions.",
+        ),
+        "auto" => (
+            "Auto",
+            "Supported providers approve routine actions; others still ask.",
+        ),
+        _ => ("Full access", "Allow commands and edits without prompts."),
+    }
+}
+
+/// The runtime modes a provider offers, in the web's order. A provider that
+/// lists none offers them all.
+pub fn runtime_modes_for(provider: Option<&Provider>) -> Vec<&'static str> {
+    let supported = provider
+        .and_then(|provider| provider.supported_runtime_modes.as_ref())
+        .filter(|modes| !modes.is_empty());
+    RUNTIME_MODES
+        .iter()
+        .copied()
+        .filter(|mode| supported.is_none_or(|supported| supported.iter().any(|s| s == mode)))
+        .collect()
+}
+
+/// A provider switch can invalidate the pending mode. Use the same first
+/// supported mode as `compatibleRuntimeMode` in `ChatComposer.tsx`.
+pub fn resolve_runtime_mode(provider: Option<&Provider>, requested: &str) -> String {
+    let modes = runtime_modes_for(provider);
+    if modes.contains(&requested) {
+        requested.to_owned()
+    } else {
+        modes.first().copied().unwrap_or(requested).to_owned()
+    }
+}
+
+/// Clicking the current model must not discard its configured options.
+pub fn select_model(current: &Value, instance_id: &str, model: &str) -> Value {
+    if current["instanceId"] == instance_id && current["model"] == model {
+        current.clone()
+    } else {
+        json!({ "instanceId": instance_id, "model": model })
+    }
+}
+
+/// `getAppModelOptionsForInstance`: rebuild custom rows from settings so a
+/// stale provider probe cannot resurrect a removed model.
+pub fn picker_models(provider: &Provider, settings: &Settings) -> Vec<ProviderModel> {
+    let mut models: Vec<_> = provider
+        .models
+        .iter()
+        .filter(|model| !model.is_custom)
+        .cloned()
+        .collect();
+    let mut seen: HashSet<_> = models.iter().map(|model| model.slug.clone()).collect();
+    if provider.driver != "antigravity"
+        && let Some(custom) = settings
+            .provider_instances
+            .get(&provider.instance_id)
+            .and_then(|instance| instance["config"]["customModels"].as_array())
+    {
+        for entry in custom {
+            let slug = entry
+                .as_str()
+                .or_else(|| entry["slug"].as_str())
+                .unwrap_or_default()
+                .trim();
+            if slug.is_empty() || slug.encode_utf16().count() > 256 || !seen.insert(slug.to_owned())
+            {
+                continue;
+            }
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(slug);
+            models.push(ProviderModel {
+                slug: slug.to_owned(),
+                name: name.to_owned(),
+                is_custom: true,
+                is_default: false,
+            });
+        }
+    }
+    if let Some(preferences) = settings
+        .provider_model_preferences
+        .as_ref()
+        .and_then(|preferences| preferences.get(&provider.instance_id))
+    {
+        if let Some(hidden) = preferences["hiddenModels"].as_array() {
+            models
+                .retain(|model| model.is_custom || !hidden.iter().any(|slug| slug == &model.slug));
+        }
+        if let Some(order) = preferences["modelOrder"].as_array() {
+            models.sort_by_key(|model| {
+                order
+                    .iter()
+                    .rposition(|slug| slug == &model.slug)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+    }
+    models
+}
+
+/// One instance in the model picker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickerProvider {
+    pub instance_id: String,
+    pub label: String,
+    /// Enabled but not ready: listed, not choosable
+    /// (`isProviderInstancePickerReady`).
+    pub ready: bool,
+    pub models: Vec<ProviderModel>,
+}
+
+/// The instances the picker lists for `project`: every enabled one, sorted
+/// like the composer. A started thread stays on its driver
+/// (`deriveLockedProvider`); switching providers needs a handoff this client
+/// does not do yet.
+pub fn picker_providers(
+    providers: &[Provider],
+    settings: &Settings,
+    project_id: Option<&str>,
+    locked_driver: Option<&str>,
+) -> Vec<PickerProvider> {
+    sorted(providers)
+        .into_iter()
+        .filter(|provider| locked_driver.is_none_or(|driver| provider.driver == driver))
+        .filter(|provider| settings.instance_enabled(project_id, provider))
+        .map(|provider| PickerProvider {
+            instance_id: provider.instance_id.clone(),
+            label: provider.display_name(),
+            ready: provider.availability.as_deref() != Some("unavailable")
+                && provider.status == "ready",
+            models: picker_models(provider, settings),
+        })
+        .collect()
+}
+
+/// `sortProviderInstanceEntries`: drivers in first-seen order, each driver's
+/// default instance first.
+fn sorted(providers: &[Provider]) -> Vec<&Provider> {
+    let mut kinds: Vec<&str> = Vec::new();
+    for provider in providers {
+        if !kinds.contains(&provider.driver.as_str()) {
+            kinds.push(&provider.driver);
+        }
+    }
+    kinds
+        .iter()
+        .flat_map(|kind| {
+            let bucket = providers.iter().filter(move |p| p.driver == *kind);
+            bucket
+                .clone()
+                .filter(|p| p.is_default_instance())
+                .chain(bucket.filter(|p| !p.is_default_instance()))
+        })
+        .collect()
+}
+
+/// `getStartedThreadModelChangeBlockReason`, without provider handoff.
+pub fn model_change_block(
+    providers: &[Provider],
+    started: bool,
+    current: &Value,
+    next: &Value,
+) -> Option<&'static str> {
+    if !started {
+        return None;
+    }
+    let instance = |selection: &Value| selection["instanceId"].as_str().map(str::to_owned);
+    if instance(current) == instance(next) && current["model"] == next["model"] {
+        return None;
+    }
+    if instance(current) != instance(next) {
+        return Some("Start a new chat to switch providers");
+    }
+    let requires_new_thread = |selection: &Value| {
+        providers.iter().any(|provider| {
+            Some(provider.instance_id.as_str()) == selection["instanceId"].as_str()
+                && provider.requires_new_thread_for_model_change
+        })
+    };
+    (requires_new_thread(current) || requires_new_thread(next))
+        .then_some("Start a new chat to change models")
 }
 
 #[cfg(test)]
@@ -498,6 +684,125 @@ mod tests {
         let mut off = provider("codex", "codex", "ready", &[("gpt", true)]);
         off.availability = Some("unavailable".into());
         assert!(new_thread_defaults(&[off], &settings(json!({})), &project()).is_none());
+    }
+
+    #[test]
+    fn a_started_thread_picks_only_its_own_driver() {
+        let mut second = provider("work", "codex", "error", &[("gpt", true)]);
+        second.display_name = Some("Work".into());
+        let providers = [
+            second,
+            provider("claudeAgent", "claudeAgent", "ready", &[("opus", true)]),
+            provider("codex", "codex", "ready", &[("gpt", true)]),
+        ];
+        let settings = settings(json!({ "providerInstances": { "work": { "driver": "codex" } } }));
+        let all = picker_providers(&providers, &settings, None, None);
+        let ids: Vec<&str> = all.iter().map(|p| p.instance_id.as_str()).collect();
+        assert_eq!(ids, ["codex", "work", "claudeAgent"]);
+        assert!(!all[1].ready);
+        let locked = picker_providers(&providers, &settings, None, Some("codex"));
+        assert_eq!(locked.len(), 2);
+    }
+
+    #[test]
+    fn picker_uses_current_custom_models_visibility_order_and_project_enablement() {
+        let mut codex = provider(
+            "codex",
+            "codex",
+            "ready",
+            &[("a", true), ("b", false), ("removed", false)],
+        );
+        codex.models[2].is_custom = true;
+        let providers = [
+            codex,
+            provider("claudeAgent", "claudeAgent", "ready", &[("opus", true)]),
+        ];
+        let settings = settings(json!({
+            "providerInstances": { "codex": { "driver": "codex", "config": { "customModels": [" fresh ", { "slug": "named", "name": "Friendly" }, "fresh", "a", ""] } } },
+            "providerModelPreferences": { "codex": { "hiddenModels": ["b"], "modelOrder": ["named", "fresh"] } },
+            "projectSettingsOverrides": { "p": { "providerInstances": { "claudeAgent": { "enabled": false } } } },
+        }));
+        let entries = picker_providers(&providers, &settings, Some("p"), None);
+        assert_eq!(entries.len(), 1);
+        let models = &entries[0].models;
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["named", "fresh", "a"]
+        );
+        assert_eq!(models[0].name, "Friendly");
+        assert!(models[0].is_custom);
+    }
+
+    #[test]
+    fn null_model_preferences_from_the_server_mean_no_filtering() {
+        let settings = settings(json!({ "providerModelPreferences": null }));
+        let provider = provider("codex", "codex", "ready", &[("gpt", true)]);
+        assert_eq!(picker_models(&provider, &settings), provider.models);
+    }
+
+    #[test]
+    fn started_threads_block_provider_switches_and_locked_models() {
+        let mut locked = provider("cursor", "cursor", "ready", &[]);
+        locked.requires_new_thread_for_model_change = true;
+        let providers = [provider("codex", "codex", "ready", &[]), locked];
+        let codex = |model: &str| json!({ "instanceId": "codex", "model": model });
+        let cursor = |model: &str| json!({ "instanceId": "cursor", "model": model });
+        assert_eq!(
+            model_change_block(&providers, false, &codex("a"), &cursor("b")),
+            None
+        );
+        assert_eq!(
+            model_change_block(&providers, true, &codex("a"), &codex("b")),
+            None
+        );
+        assert_eq!(
+            model_change_block(&providers, true, &codex("a"), &cursor("b")),
+            Some("Start a new chat to switch providers")
+        );
+        assert_eq!(
+            model_change_block(&providers, true, &cursor("a"), &cursor("b")),
+            Some("Start a new chat to change models")
+        );
+    }
+
+    #[test]
+    fn runtime_modes_follow_the_provider() {
+        assert_eq!(runtime_modes_for(None).len(), 4);
+        let mut limited = provider("codex", "codex", "ready", &[]);
+        limited.supported_runtime_modes =
+            Some(vec!["full-access".into(), "approval-required".into()]);
+        assert_eq!(
+            runtime_modes_for(Some(&limited)),
+            ["approval-required", "full-access"]
+        );
+    }
+
+    #[test]
+    fn switching_providers_resolves_an_unsupported_pending_mode() {
+        let mut provider = provider("limited", "cursor", "ready", &[]);
+        provider.supported_runtime_modes = Some(vec!["approval-required".into()]);
+        assert_eq!(
+            resolve_runtime_mode(Some(&provider), "full-access"),
+            "approval-required"
+        );
+        assert_eq!(resolve_runtime_mode(None, "auto"), "auto");
+    }
+
+    #[test]
+    fn reselecting_a_model_preserves_options_but_switching_clears_them() {
+        let current = json!({ "instanceId": "codex", "model": "gpt", "options": [{ "id": "effort", "value": "high" }] });
+        assert_eq!(select_model(&current, "codex", "gpt"), current);
+        assert_eq!(
+            select_model(&current, "codex", "other"),
+            json!({ "instanceId": "codex", "model": "other" })
+        );
+        assert_eq!(
+            select_model(&current, "work", "gpt"),
+            json!({ "instanceId": "work", "model": "gpt" })
+        );
     }
 
     #[test]

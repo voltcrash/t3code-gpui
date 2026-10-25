@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use t3_client::RpcClient;
 use t3_client::auth::{self, ClientMetadata};
 use t3_client::commands;
+use t3_client::config::{self, ConfigStreamItem, ServerState};
 use t3_client::shell::{self, ShellCapabilities, ShellState, ShellStreamItem};
 use t3_host::{Backend, BackendLaunch};
 use url::Url;
@@ -43,6 +44,8 @@ pub struct LocalEnvironment {
     pub rpc: Option<RpcClient>,
     /// The server resolves send and stop commands (`commands::supported`).
     pub commands_supported: bool,
+    /// Providers and settings, current while connected.
+    pub server: ServerState,
     _run: Task<()>,
     _quit: Subscription,
 }
@@ -82,6 +85,7 @@ impl LocalEnvironment {
             capabilities: ShellCapabilities::default(),
             rpc: None,
             commands_supported: false,
+            server: ServerState::default(),
             _run: run,
             _quit: quit,
         }
@@ -153,6 +157,10 @@ async fn run(
             env.state = ConnectionState::Connected;
             env.rpc = Some(rpc.clone());
             env.commands_supported = commands::supported(&config);
+            env.server = ServerState::default();
+            env.server.apply(ConfigStreamItem::Snapshot {
+                config: config.clone(),
+            });
             cx.notify();
             env.shell.sequence
         })?;
@@ -162,6 +170,19 @@ async fn run(
             Some(sequence) => json!({ "afterSequence": sequence }),
             None => json!({}),
         };
+        // Lives as long as this connection's shell stream.
+        let _config = cx.spawn({
+            let this = this.clone();
+            let rpc = rpc.clone();
+            async move |cx: &mut AsyncApp| {
+                let mut retry = RETRY_INITIAL;
+                while let Err(error) = follow_config(this.clone(), rpc.clone(), cx).await {
+                    tracing::warn!("config stream ended: {error:#}");
+                    cx.background_executor().timer(retry).await;
+                    retry = (retry * 2).min(RETRY_MAX);
+                }
+            }
+        });
         let mut updates = rpc.subscribe::<_, ShellStreamItem>(shell::SUBSCRIBE, &input);
         while let Some(item) = updates.next().await {
             match item {
@@ -185,6 +206,32 @@ async fn run(
         }
         set_state(&this, cx, ConnectionState::Reconnecting)?;
     }
+}
+
+/// Subscribes before reading the settings so no update falls between them.
+async fn follow_config(
+    this: WeakEntity<LocalEnvironment>,
+    rpc: RpcClient,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    let mut items = rpc.subscribe::<_, ConfigStreamItem>(config::SUBSCRIBE, &json!({}));
+    let settings = rpc
+        .call::<_, Value>(config::GET_SETTINGS, &json!({}))
+        .await?;
+    let settings = serde_json::from_value(settings)?;
+    this.update(cx, |env, cx| {
+        env.server.settings = Some(settings);
+        cx.notify();
+    })?;
+    while let Some(item) = items.next().await {
+        let item = item?;
+        this.update(cx, |env, cx| {
+            if env.server.apply(item) {
+                cx.notify();
+            }
+        })?;
+    }
+    Err(anyhow!("server config stream ended"))
 }
 
 const CLIENT_LABEL: &str = "T3 Code desktop";

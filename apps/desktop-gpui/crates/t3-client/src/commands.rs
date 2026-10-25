@@ -28,9 +28,10 @@ fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// `startThreadTurn` with `dispatchMode: "auto"` and no attachments.
-pub fn send_message(thread_id: &str, text: &str) -> Value {
-    json!({
+/// `startThreadTurn` with `dispatchMode: "auto"` and no attachments. A
+/// `model_selection` switches the thread's model from this turn on.
+pub fn send_message(thread_id: &str, text: &str, model_selection: Option<&Value>) -> Value {
+    let mut command = json!({
         "type": "message.dispatch",
         "commandId": new_id(),
         "createdBy": "user",
@@ -41,7 +42,35 @@ pub fn send_message(thread_id: &str, text: &str) -> Value {
         "attachments": [],
         "deliveryIntent": "auto",
         "dispatchMode": { "type": "start_immediately" },
+    });
+    if let Some(model_selection) = model_selection {
+        command["modelSelection"] = model_selection.clone();
+    }
+    command
+}
+
+/// `setThreadRuntimeMode`, sent before the turn it applies to.
+pub fn set_runtime_mode(thread_id: &str, runtime_mode: &str) -> Value {
+    json!({
+        "type": "thread.runtime-mode.set",
+        "commandId": new_id(),
+        "threadId": thread_id,
+        "runtimeMode": runtime_mode,
     })
+}
+
+/// Persist the pending mode before dispatching the message that uses it.
+pub fn send_turn(
+    thread_id: &str,
+    text: &str,
+    model_selection: Option<&Value>,
+    runtime_mode: Option<&str>,
+) -> Vec<Value> {
+    runtime_mode
+        .map(|mode| set_runtime_mode(thread_id, mode))
+        .into_iter()
+        .chain([send_message(thread_id, text, model_selection)])
+        .collect()
 }
 
 /// `interruptThreadTurn` without a run: the server stops whatever is running.
@@ -162,11 +191,25 @@ mod tests {
 
     #[test]
     fn each_message_gets_fresh_command_and_message_ids() {
-        let first = send_message("thread-1", "hi");
-        let second = send_message("thread-1", "hi");
+        let first = send_message("thread-1", "hi", None);
+        let second = send_message("thread-1", "hi", None);
         assert_ne!(first["commandId"], second["commandId"]);
         assert_ne!(first["messageId"], second["messageId"]);
         assert_ne!(first["commandId"], first["messageId"]);
+    }
+
+    #[test]
+    fn a_next_turn_persists_its_mode_before_the_message_and_carries_model_options() {
+        let model = json!({ "instanceId": "codex", "model": "other", "options": [{ "id": "effort", "value": "high" }] });
+        let commands = send_turn("thread-1", "hello", Some(&model), Some("approval-required"));
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["type"], "thread.runtime-mode.set");
+        assert_eq!(commands[0]["runtimeMode"], "approval-required");
+        assert_eq!(commands[1]["type"], "message.dispatch");
+        assert_eq!(commands[1]["modelSelection"], model);
+        let unchanged = send_turn("thread-1", "hello", None, None);
+        assert_eq!(unchanged.len(), 1);
+        assert!(unchanged[0].get("modelSelection").is_none());
     }
 
     #[test]
