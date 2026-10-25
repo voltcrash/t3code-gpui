@@ -106,9 +106,14 @@ impl ThreadActions {
         let Some(thread) = env.thread(&thread_id) else {
             return;
         };
-        // These are client preferences, not server settings. Match the defaults
-        // in packages/contracts/src/settings.ts.
-        let confirm = matches!(action, Action::Rename(_) | Action::Delete);
+        let preferences = crate::preferences::global(cx);
+        let preferences = &preferences.read(cx).value;
+        let confirm = match action {
+            Action::Rename(_) => true,
+            Action::Archive => preferences.confirm_thread_archive,
+            Action::Delete => preferences.confirm_thread_delete,
+            _ => false,
+        };
         if confirm {
             let title = thread.title.clone();
             if matches!(action, Action::Rename(_)) {
@@ -277,8 +282,18 @@ impl Render for ThreadActions {
                 });
             });
         }
-        let warning = "This permanently clears conversation history for this thread. Files in the project are kept.";
-        let confirm_label = if renaming { "Save" } else { "Delete thread" };
+        let warning = if deleting {
+            "This permanently clears conversation history for this thread. Files in the project are kept."
+        } else {
+            "This thread will move to the archive. You can restore it later."
+        };
+        let confirm_label = if renaming {
+            "Save"
+        } else if deleting {
+            "Delete thread"
+        } else {
+            "Archive thread"
+        };
         v_flex()
             .id("thread-action-dialog")
             .track_focus(&self.focus)

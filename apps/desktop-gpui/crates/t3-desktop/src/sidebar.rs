@@ -26,6 +26,7 @@ pub enum SidebarEvent {
     SelectionChanged,
     NewThread,
     AddProject,
+    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -464,6 +465,16 @@ impl Render for Sidebar {
                 .flex_1()
                 .px_2()
                 .track_scroll(&self.scroll),
+            )
+            .child(
+                div().p_2().child(
+                    Button::new("open-settings")
+                        .label("Settings")
+                        .icon(Icon::new(Lucide::Settings))
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::Settings))),
+                ),
             )
     }
 }
