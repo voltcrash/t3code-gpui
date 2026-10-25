@@ -10,6 +10,7 @@ mod project_picker;
 mod settings;
 mod sidebar;
 mod thread_actions;
+mod thread_find;
 mod thread_view;
 mod tokio_bridge;
 mod workspace;

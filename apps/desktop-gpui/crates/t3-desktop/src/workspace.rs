@@ -2,7 +2,7 @@
 
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::menu::AppMenuBar;
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -25,13 +25,14 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 const SIDEBAR_WIDTH: Pixels = px(280.);
 const CONTEXT: &str = "Workspace";
 
-actions!(workspace, [NewThread]);
+actions!(workspace, [NewThread, FindInThread]);
 
 /// `chat.new` in `packages/shared/src/keybindings.ts`.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
     ]);
 }
 
@@ -54,6 +55,17 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn find_in_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        if let Some(thread) = &self.thread {
+            thread.update(cx, |thread, cx| thread.open_find(window, cx));
+        }
+    }
     pub fn new(env: Entity<LocalEnvironment>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
@@ -341,8 +353,23 @@ impl Workspace {
                         )
                     })
                     .child(
-                        div()
+                        h_flex()
                             .ml_auto()
+                            .gap_1()
+                            .child(
+                                Button::new("find-in-thread")
+                                    .icon(gpui_kit::component::Icon::new(
+                                        gpui_kit::assets::IconName::Search,
+                                    ))
+                                    .ghost()
+                                    .small()
+                                    .accessibility_label("Find in thread")
+                                    .tooltip("Find in thread (Cmd/Ctrl+F)")
+                                    .disabled(!env.server.thread_find || env.rpc.is_none())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.find_in_thread(window, cx)
+                                    })),
+                            )
                             .child(thread_actions::button(&self.actions, &thread.id)),
                     )
             }
@@ -522,6 +549,9 @@ impl Render for Workspace {
             .relative()
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FindInThread, window, cx| this.find_in_thread(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )

@@ -99,7 +99,9 @@ await Effect.runPromise(
             text:
               type === "user_message"
                 ? `Question ${turn}`
-                : `Answer ${turn}. This message is stored on the existing Node server.`,
+                : turn === 1
+                  ? "Answer 1. First **needle** and second needle.\n\n[Reference](https://hidden.example/needle)"
+                  : `Answer ${turn}. This message is stored on the existing Node server.`,
             startedAt: now,
             completedAt: now,
             updatedAt: now,
