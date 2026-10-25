@@ -7,6 +7,7 @@ mod format;
 mod launch;
 mod project_picker;
 mod sidebar;
+mod thread_actions;
 mod thread_view;
 mod tokio_bridge;
 mod workspace;

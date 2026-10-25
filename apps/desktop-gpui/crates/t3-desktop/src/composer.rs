@@ -585,7 +585,7 @@ impl Composer {
     fn can_send(&self, cx: &App) -> bool {
         let env = self.env.read(cx);
         let ready = match &self.target {
-            Target::Thread(_) => true,
+            Target::Thread(id) => env.shell.threads.contains_key(id.as_ref()),
             Target::Draft(draft) => draft.defaults.is_some(),
         };
         env.rpc.is_some() && env.commands_supported && !self.busy && ready

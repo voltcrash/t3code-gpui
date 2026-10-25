@@ -4,9 +4,11 @@
 use std::ops::Range;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::thread_actions::{self, ThreadActions};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -30,6 +32,7 @@ pub enum SidebarEvent {
 enum Shelf {
     Snoozed,
     Settled,
+    Archived,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +61,7 @@ enum Row {
         expanded: bool,
     },
     ShowMore,
+    ArchiveNotice(SharedString),
 }
 
 pub struct Sidebar {
@@ -65,6 +69,9 @@ pub struct Sidebar {
     selected: Option<SharedString>,
     snoozed_expanded: bool,
     settled_expanded: bool,
+    archived_expanded: bool,
+    actions: Entity<ThreadActions>,
+    _actions: Subscription,
     settled_visible: usize,
     rows: Vec<Row>,
     scroll: UniformListScrollHandle,
@@ -75,7 +82,12 @@ pub struct Sidebar {
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
-    pub fn new(env: Entity<LocalEnvironment>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        env: Entity<LocalEnvironment>,
+        actions: Entity<ThreadActions>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let actions_observe = cx.observe(&actions, |_, _, cx| cx.notify());
         let observe = cx.observe(&env, |_, _, cx| cx.notify());
         // Ages and snooze wake-ups are minute-grained, like the web sidebar.
         let clock = cx.spawn(async move |this, cx| {
@@ -93,6 +105,9 @@ impl Sidebar {
             selected: None,
             snoozed_expanded: false,
             settled_expanded: false,
+            archived_expanded: false,
+            actions,
+            _actions: actions_observe,
             settled_visible: SETTLED_INITIAL,
             rows: Vec::new(),
             scroll: UniformListScrollHandle::new(),
@@ -121,6 +136,12 @@ impl Sidebar {
         match shelf {
             Shelf::Snoozed => self.snoozed_expanded = !self.snoozed_expanded,
             Shelf::Settled => self.settled_expanded = !self.settled_expanded,
+            Shelf::Archived => {
+                self.archived_expanded = !self.archived_expanded;
+                if self.archived_expanded {
+                    self.env.update(cx, |env, cx| env.load_archives(cx));
+                }
+            }
         }
         cx.notify();
     }
@@ -193,6 +214,36 @@ impl Sidebar {
                 rows.push(Row::ShowMore);
             }
         }
+        let archived_map = if env.archives.sequence.is_some() {
+            &env.archives.threads
+        } else {
+            &env.shell.archived
+        };
+        let mut archived: Vec<_> = archived_map
+            .values()
+            .filter(|thread| !thread.is_subagent())
+            .collect();
+        archived.sort_by_key(|thread| {
+            (
+                std::cmp::Reverse(timestamp_ms(thread.archived_at.as_deref()).unwrap_or(0)),
+                &thread.id,
+            )
+        });
+        rows.push(Row::Shelf {
+            shelf: Shelf::Archived,
+            count: archived.len(),
+            expanded: self.archived_expanded,
+        });
+        rows.extend(shown(&archived, self.archived_expanded, usize::MAX, false));
+        if self.archived_expanded {
+            if let Some(error) = &env.archive_error {
+                rows.push(Row::ArchiveNotice(error.clone()));
+            } else if env.archives.sequence.is_none() {
+                rows.push(Row::ArchiveNotice("Loading archive…".into()));
+            } else if archived.is_empty() {
+                rows.push(Row::ArchiveNotice("No archived threads".into()));
+            }
+        }
         self.rows = rows;
     }
 
@@ -211,36 +262,43 @@ impl Sidebar {
             Row::Thread(thread) => {
                 let selected = self.selected.as_ref() == Some(&thread.id);
                 let id = thread.id.clone();
-                base.when(selected, |row| {
-                    row.bg(theme.sidebar_accent)
-                        .text_color(theme.sidebar_accent_foreground)
-                })
-                .when(!selected, |row| {
-                    row.hover(|row| row.bg(theme.sidebar_accent.opacity(0.5)))
-                })
-                .child(indicator(thread.indicator, cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(thread.title.clone()),
-                )
-                .when(thread.pinned, |row| {
-                    row.child(
-                        Icon::new(Lucide::Pin)
-                            .xsmall()
-                            .text_color(theme.muted_foreground.opacity(0.65)),
+                let actions = self.actions.clone();
+                let menu_id = thread.id.clone();
+                base.id(thread.id.clone())
+                    .when(selected, |row| {
+                        row.bg(theme.sidebar_accent)
+                            .text_color(theme.sidebar_accent_foreground)
+                    })
+                    .when(!selected, |row| {
+                        row.hover(|row| row.bg(theme.sidebar_accent.opacity(0.5)))
+                    })
+                    .child(indicator(thread.indicator, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(thread.title.clone()),
                     )
-                })
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(thread.time.clone()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                .into_any_element()
+                    .when(thread.pinned, |row| {
+                        row.child(
+                            Icon::new(Lucide::Pin)
+                                .xsmall()
+                                .text_color(theme.muted_foreground.opacity(0.65)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(thread.time.clone()),
+                    )
+                    .child(thread_actions::button(&self.actions, &thread.id))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+                    .context_menu(move |menu, _, cx| {
+                        thread_actions::menu(menu, &actions, &menu_id, cx)
+                    })
+                    .into_any_element()
             }
             Row::Shelf {
                 shelf,
@@ -251,6 +309,7 @@ impl Sidebar {
                 let label = match shelf {
                     Shelf::Snoozed => "Snoozed",
                     Shelf::Settled => "Settled",
+                    Shelf::Archived => "Archived",
                 };
                 base.text_xs()
                     .text_color(theme.muted_foreground)
@@ -264,10 +323,17 @@ impl Sidebar {
                         .xsmall(),
                     )
                     .child(label)
-                    .child(div().ml_auto().child(count.to_string()))
+                    .when(*count > 0, |row| {
+                        row.child(div().ml_auto().child(count.to_string()))
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(shelf, cx)))
                     .into_any_element()
             }
+            Row::ArchiveNotice(message) => base
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(message.clone())
+                .into_any_element(),
             Row::ShowMore => base
                 .text_xs()
                 .text_color(theme.muted_foreground)

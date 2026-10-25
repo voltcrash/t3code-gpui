@@ -16,6 +16,7 @@ use crate::draft_view::{DraftEvent, DraftView};
 use crate::environment::{ConnectionState, LocalEnvironment};
 use crate::project_picker::{ProjectEvent, ProjectPicker};
 use crate::sidebar::{Sidebar, SidebarEvent};
+use crate::thread_actions::{self, ThreadActions};
 use crate::thread_view::ThreadView;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -39,6 +40,7 @@ pub struct Workspace {
     menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
     sidebar: Entity<Sidebar>,
+    actions: Entity<ThreadActions>,
     thread: Option<Entity<ThreadView>>,
     draft: Option<(Entity<DraftView>, Subscription)>,
     project_picker: Option<(Entity<ProjectPicker>, Subscription)>,
@@ -49,17 +51,21 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(env: Entity<LocalEnvironment>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sidebar = cx.new(|cx| Sidebar::new(env.clone(), cx));
+        let focus = cx.focus_handle();
+        let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
+        let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), cx));
         let subscriptions = vec![
+            cx.observe(&actions, |_, _, cx| cx.notify()),
             cx.observe_in(&env, window, |this, env, window, cx| {
                 let env = env.read(cx);
                 let missing_draft = this.draft.as_ref().is_some_and(|(draft, _)| {
                     env.shell.project(draft.read(cx).project_id()).is_none()
                 });
-                let missing_thread = this.sidebar.read(cx).selected().is_some_and(|id| {
-                    !env.shell.threads.contains_key(id.as_ref())
-                        && !env.shell.archived.contains_key(id.as_ref())
-                });
+                let missing_thread = this
+                    .sidebar
+                    .read(cx)
+                    .selected()
+                    .is_some_and(|id| env.thread(id.as_ref()).is_none());
                 let ready = this
                     .pending_project
                     .clone()
@@ -88,11 +94,12 @@ impl Workspace {
             ),
         ];
         Self {
-            focus: cx.focus_handle(),
+            focus,
             zoom: 1.,
             menu: AppMenuBar::new(cx),
             env,
             sidebar,
+            actions,
             thread: None,
             draft: None,
             project_picker: None,
@@ -105,6 +112,9 @@ impl Workspace {
     /// Opens a draft in the open thread's project, else the draft's own,
     /// else the most recently active one.
     fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.actions.read(cx).has_dialog() {
+            return;
+        }
         self.project_picker = None;
         self.pending_project = None;
         self.project_notice = None;
@@ -159,6 +169,9 @@ impl Workspace {
     }
 
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.actions.read(cx).has_dialog() {
+            return;
+        }
         if self.project_picker.is_some() {
             return;
         }
@@ -244,12 +257,11 @@ impl Workspace {
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let env = self.env.read(cx);
-        let thread = self.sidebar.read(cx).selected().and_then(|id| {
-            env.shell
-                .threads
-                .get(id.as_ref())
-                .or_else(|| env.shell.archived.get(id.as_ref()))
-        });
+        let thread = self
+            .sidebar
+            .read(cx)
+            .selected()
+            .and_then(|id| env.thread(id.as_ref()));
 
         let header = h_flex()
             .h_12()
@@ -289,6 +301,11 @@ impl Workspace {
                                 .child(branch),
                         )
                     })
+                    .child(
+                        div()
+                            .ml_auto()
+                            .child(thread_actions::button(&self.actions, &thread.id)),
+                    )
             }
             (None, None) => header.child(
                 div()
@@ -411,6 +428,33 @@ impl Workspace {
                         ),
                 )
             })
+            .when_some(
+                self.actions
+                    .read(cx)
+                    .error
+                    .clone()
+                    .filter(|_| !self.actions.read(cx).has_dialog()),
+                |column, error| {
+                    column.child(
+                        h_flex()
+                            .px_4()
+                            .py_2()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().flex_1().text_color(theme.danger).child(error))
+                            .child(
+                                Button::new("dismiss-thread-error")
+                                    .label("Dismiss")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.actions
+                                            .update(cx, |actions, cx| actions.dismiss_error(cx))
+                                    })),
+                            ),
+                    )
+                },
+            )
             .child(body)
             .into_any_element()
     }
@@ -473,6 +517,20 @@ impl Render for Workspace {
                     )
                     .child(self.render_main(cx)),
             )
+            .when(self.actions.read(cx).has_dialog(), |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .bg(cx.theme().background.opacity(0.7))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .child(self.actions.clone()),
+                )
+            })
             .children(self.project_picker.as_ref().map(|(picker, _)| {
                 div()
                     .absolute()

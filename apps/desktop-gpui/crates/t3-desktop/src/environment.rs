@@ -44,6 +44,11 @@ pub struct LocalEnvironment {
     pub rpc: Option<RpcClient>,
     /// The server resolves send and stop commands (`commands::supported`).
     pub commands_supported: bool,
+    pub thread_actions: t3_client::thread_actions::Capabilities,
+    pub archives: t3_client::archives::State,
+    pub archive_error: Option<SharedString>,
+    archive_requested: bool,
+    archive_task: Option<Task<()>>,
     /// Providers and settings, current while connected.
     pub server: ServerState,
     _run: Task<()>,
@@ -51,6 +56,64 @@ pub struct LocalEnvironment {
 }
 
 impl LocalEnvironment {
+    pub fn thread(&self, id: &str) -> Option<&t3_client::shell::ThreadShell> {
+        self.shell
+            .threads
+            .get(id)
+            .or_else(|| self.archives.threads.get(id))
+            .or_else(|| self.shell.archived.get(id))
+    }
+
+    pub fn load_archives(&mut self, cx: &mut Context<Self>) {
+        self.archive_requested = true;
+        if self.archive_task.is_some() {
+            return;
+        }
+        let Some(rpc) = self.rpc.clone() else {
+            return;
+        };
+        self.archive_task = Some(cx.spawn(async move |this, cx| {
+            let mut retry = RETRY_INITIAL;
+            loop {
+                let mut updates = rpc.subscribe::<_, t3_client::archives::StreamItem>(
+                    t3_client::archives::SUBSCRIBE,
+                    &json!({}),
+                );
+                while let Some(item) = updates.next().await {
+                    match item {
+                        Ok(item) => {
+                            retry = RETRY_INITIAL;
+                            if this
+                                .update(cx, |this, cx| {
+                                    this.archive_error = None;
+                                    if this.archives.apply(item) {
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = this.update(cx, |this, cx| {
+                                this.archive_error = Some(error.detail().into());
+                                cx.notify();
+                            });
+                            break;
+                        }
+                    }
+                }
+                if rpc.is_closed() {
+                    return;
+                }
+                cx.background_executor().timer(retry).await;
+                retry = (retry * 2).min(RETRY_MAX);
+            }
+        }));
+        cx.notify();
+    }
+
     pub fn start(launch: BackendLaunch, cx: &mut Context<Self>) -> Self {
         let backend = Arc::new(Mutex::new(None));
         let run = cx.spawn({
@@ -85,6 +148,11 @@ impl LocalEnvironment {
             capabilities: ShellCapabilities::default(),
             rpc: None,
             commands_supported: false,
+            thread_actions: Default::default(),
+            archives: Default::default(),
+            archive_error: None,
+            archive_requested: false,
+            archive_task: None,
             server: ServerState::default(),
             _run: run,
             _quit: quit,
@@ -156,7 +224,12 @@ async fn run(
             };
             env.state = ConnectionState::Connected;
             env.rpc = Some(rpc.clone());
+            env.archive_task = None;
+            if env.archive_requested {
+                env.load_archives(cx);
+            }
             env.commands_supported = commands::supported(&config);
+            env.thread_actions = t3_client::thread_actions::Capabilities::from_config(&config);
             env.server = ServerState::default();
             env.server.apply(ConfigStreamItem::Snapshot {
                 config: config.clone(),
