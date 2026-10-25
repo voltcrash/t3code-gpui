@@ -30,6 +30,8 @@ pub struct ServerState {
     pub providers_loaded: bool,
     /// `None` until `server.getSettings` answers.
     pub settings: Option<Settings>,
+    pub thread_find: bool,
+    pub thread_find_progressive: bool,
 }
 
 impl ServerState {
@@ -37,6 +39,8 @@ impl ServerState {
     pub fn apply(&mut self, item: ConfigStreamItem) -> bool {
         match item {
             ConfigStreamItem::Snapshot { config } => {
+                self.thread_find = config["threadFind"] == true;
+                self.thread_find_progressive = config["threadFindProgressive"] == true;
                 self.providers = providers::from_config(&config);
                 self.providers_loaded = true;
                 true
@@ -98,5 +102,20 @@ mod tests {
         );
         let other = json!({ "version": 1, "type": "keybindingsUpdated", "payload": {} });
         assert!(!ServerState::default().apply(serde_json::from_value(other).unwrap()));
+    }
+
+    #[test]
+    fn thread_find_follows_server_capabilities_and_survives_provider_updates() {
+        let mut state = ServerState::default();
+        state.apply(ConfigStreamItem::Snapshot {
+            config: json!({ "threadFind": true, "threadFindProgressive": true }),
+        });
+        assert!(state.thread_find && state.thread_find_progressive);
+        state.apply(ConfigStreamItem::ProviderStatuses {
+            payload: json!({ "providers": [] }),
+        });
+        assert!(state.thread_find && state.thread_find_progressive);
+        state.apply(ConfigStreamItem::Snapshot { config: json!({}) });
+        assert!(!state.thread_find && !state.thread_find_progressive);
     }
 }

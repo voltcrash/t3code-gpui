@@ -32,9 +32,22 @@ impl HistoryClient {
     }
 
     pub async fn page(&self, thread_id: &str, cursor: &str) -> Result<HistoryPage, HistoryError> {
+        self.page_through(thread_id, cursor, None).await
+    }
+
+    pub async fn page_through(
+        &self,
+        thread_id: &str,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+    ) -> Result<HistoryPage, HistoryError> {
+        let mut url = history_url(&self.base, thread_id, cursor);
+        if let Some(entry) = through_entry_id {
+            url.query_pairs_mut().append_pair("throughEntryId", entry);
+        }
         let response = self
             .http
-            .get(history_url(&self.base, thread_id, cursor))
+            .get(url)
             .bearer_auth(&self.access_token)
             .header(
                 "x-t3-orchestration-protocol",
