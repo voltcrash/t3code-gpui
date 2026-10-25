@@ -192,6 +192,8 @@ pub enum ThreadStreamItem {
         snapshot_sequence: u64,
         projection: Box<ThreadProjection>,
         #[serde(default)]
+        history_cursor: Option<String>,
+        #[serde(default)]
         has_more_history: bool,
         latest_local_turn_ordinal: Option<u64>,
     },
@@ -226,6 +228,24 @@ pub struct ThreadState {
     pub latest_local_turn_ordinal: Option<u64>,
     /// Replay after a (re)subscribe is complete.
     pub synchronized: bool,
+    pub history_cursor: Option<String>,
+    // Even an identical cursor must not let an in-flight page overwrite a new snapshot.
+    snapshot_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRequest {
+    pub cursor: String,
+    generation: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub snapshot_sequence: u64,
+    pub items: Vec<ProjectedTurnItem>,
+    pub next_cursor: Option<String>,
+    pub has_more_history: bool,
 }
 
 impl ThreadState {
@@ -241,6 +261,7 @@ impl ThreadState {
             ThreadStreamItem::Snapshot {
                 snapshot_sequence,
                 projection,
+                history_cursor,
                 has_more_history,
                 latest_local_turn_ordinal,
             } => {
@@ -248,6 +269,9 @@ impl ThreadState {
                 self.projection = Some(*projection);
                 self.partial = has_more_history;
                 self.latest_local_turn_ordinal = latest_local_turn_ordinal;
+                self.history_cursor = history_cursor;
+                self.snapshot_generation += 1;
+                self.synchronized = false;
                 true
             }
             ThreadStreamItem::Event { sequence, event } => {
@@ -274,6 +298,108 @@ impl ThreadState {
             .map(timeline_entries)
             .unwrap_or_default()
     }
+
+    pub fn history_request(&self) -> Option<HistoryRequest> {
+        if !self.synchronized || !self.partial || self.projection.is_none() {
+            return None;
+        }
+        Some(HistoryRequest {
+            cursor: self.history_cursor.clone()?,
+            generation: self.snapshot_generation,
+        })
+    }
+
+    pub fn is_current_history_request(&self, request: &HistoryRequest) -> bool {
+        request.generation == self.snapshot_generation
+            && self.history_cursor.as_deref() == Some(request.cursor.as_str())
+    }
+
+    /// Pages extend the loaded window. They never advance the live stream's resume sequence.
+    pub fn apply_history(&mut self, request: &HistoryRequest, page: HistoryPage) -> bool {
+        if !self.is_current_history_request(request) {
+            return false;
+        }
+        let Some(projection) = &mut self.projection else {
+            return false;
+        };
+        merge_history(projection, page.items);
+        self.history_cursor = page.next_cursor;
+        self.partial = page.has_more_history;
+        true
+    }
+}
+
+/// Matches `mergeOlderHistoryIntoProjection`: current rows win over overlapping pages,
+/// and local items removed by live events must not be resurrected by an older response.
+fn merge_history(projection: &mut ThreadProjection, older: Vec<ProjectedTurnItem>) {
+    let current: HashMap<_, _> = projection
+        .visible_turn_items
+        .iter()
+        .map(|row| {
+            (
+                (row.source_thread_id.clone(), row.source_item_id.clone()),
+                row,
+            )
+        })
+        .collect();
+    let items: HashMap<_, _> = projection
+        .turn_items
+        .iter()
+        .map(|item| (item.id.as_str(), item))
+        .collect();
+    let visibility = VisibilityRules::new(
+        &projection.runs,
+        &projection.attempts,
+        &projection.turn_items,
+    );
+    let mut added = Vec::new();
+    let mut added_ids = HashSet::new();
+    let mut keys = HashSet::new();
+    let mut rows = Vec::with_capacity(older.len() + current.len());
+    for mut row in older {
+        let key = (row.source_thread_id.clone(), row.source_item_id.clone());
+        if keys.contains(&key) {
+            continue;
+        }
+        let local = row.visibility == Visibility::Local
+            || Some(row.source_thread_id.as_str()) == projection.thread_id();
+        if let Some(current) = current.get(&key) {
+            row = (*current).clone();
+        } else if local {
+            if let Some(item) = items.get(row.source_item_id.as_str()) {
+                if item.kind != "run_interrupt_request" || !visibility.is_visible(item) {
+                    continue;
+                }
+                row.item = (*item).clone();
+            }
+            if !visibility.is_visible(&row.item) {
+                continue;
+            }
+        }
+        if local
+            && !items.contains_key(row.source_item_id.as_str())
+            && added_ids.insert(row.source_item_id.clone())
+        {
+            added.push(row.item.clone());
+        }
+        keys.insert(key);
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return;
+    }
+    rows.extend(
+        projection
+            .visible_turn_items
+            .iter()
+            .filter(|row| {
+                !keys.contains(&(row.source_thread_id.clone(), row.source_item_id.clone()))
+            })
+            .cloned(),
+    );
+    renumber(&mut rows);
+    projection.turn_items.extend(added);
+    projection.visible_turn_items = rows;
 }
 
 /// Mirrors `applyOrchestrationV2ProjectionEvent` for the collections kept here.
@@ -1181,5 +1307,169 @@ mod tests {
     fn subscribe_input_resumes_after_the_last_sequence() {
         assert_eq!(subscribe_input("t", Some(7))["afterSequence"], 7);
         assert!(subscribe_input("t", None).get("afterSequence").is_none());
+    }
+
+    fn history_snapshot(items: Vec<Value>, cursor: &str) -> ThreadStreamItem {
+        let mut snapshot = snapshot(items, json!([]), true);
+        if let ThreadStreamItem::Snapshot { history_cursor, .. } = &mut snapshot {
+            *history_cursor = Some(cursor.into());
+        }
+        snapshot
+    }
+
+    fn page(items: Vec<Value>, next: Option<&str>) -> HistoryPage {
+        serde_json::from_value(json!({
+            "snapshotSequence": 99,
+            "items": items,
+            "nextCursor": next,
+            "hasMoreHistory": next.is_some(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn older_pages_preserve_live_text_and_resume_sequence() {
+        let mut state = ThreadState::default();
+        state.apply(history_snapshot(
+            vec![item("c", "assistant_message", 3, None)],
+            "opaque+cursor",
+        ));
+        assert!(
+            state.history_request().is_none(),
+            "wait for replay completion"
+        );
+        state.apply(ThreadStreamItem::Synchronized);
+        let request = state.history_request().unwrap();
+        let mut live = item("c", "assistant_message", 3, None);
+        live["text"] = "live text".into();
+        state.apply(event(11, "turn-item.updated", live));
+        assert!(state.apply_history(
+            &request,
+            page(
+                vec![
+                    row(0, item("a", "user_message", 1, None)),
+                    row(1, item("a", "user_message", 1, None)),
+                    row(2, item("b", "assistant_message", 2, None)),
+                    row(3, item("c", "assistant_message", 3, None)),
+                ],
+                Some("next")
+            )
+        ));
+        assert_eq!(ids(&state), ["a", "b", "c"]);
+        assert_eq!(state.sequence, Some(11));
+        assert_eq!(state.history_cursor.as_deref(), Some("next"));
+        assert!(state.partial);
+        assert!(
+            matches!(&state.timeline()[2].content, TimelineContent::Message { text, .. } if text == "live text")
+        );
+        let mut updated = item("a", "user_message", 1, None);
+        updated["text"] = "updated older message".into();
+        state.apply(event(12, "turn-item.updated", updated));
+        assert_eq!(ids(&state), ["a", "b", "c"]);
+        assert!(
+            matches!(&state.timeline()[0].content, TimelineContent::Message { text, .. } if text == "updated older message")
+        );
+        let last = state.history_request().unwrap();
+        assert!(state.apply_history(&last, page(vec![], None)));
+        assert!(!state.partial);
+        assert!(state.history_request().is_none());
+    }
+
+    #[test]
+    fn replacement_snapshots_reject_old_pages_even_with_the_same_cursor() {
+        let mut state = ThreadState::default();
+        state.apply(history_snapshot(
+            vec![item("c", "user_message", 3, None)],
+            "same",
+        ));
+        state.apply(ThreadStreamItem::Synchronized);
+        let request = state.history_request().unwrap();
+        state.apply(history_snapshot(
+            vec![item("d", "user_message", 4, None)],
+            "same",
+        ));
+        state.apply(ThreadStreamItem::Synchronized);
+        assert!(!state.is_current_history_request(&request));
+        assert!(!state.apply_history(
+            &request,
+            page(vec![row(0, item("a", "user_message", 1, None))], None)
+        ));
+        assert_eq!(ids(&state), ["d"]);
+        assert_eq!(state.history_cursor.as_deref(), Some("same"));
+    }
+
+    #[test]
+    fn history_identity_includes_the_source_thread_and_visibility() {
+        let mut state = ThreadState::default();
+        state.apply(history_snapshot(
+            vec![item("same", "user_message", 2, None)],
+            "first",
+        ));
+        state.apply(ThreadStreamItem::Synchronized);
+        let request = state.history_request().unwrap();
+        let mut inherited = row(0, item("same", "user_message", 1, None));
+        inherited["visibility"] = "inherited".into();
+        inherited["sourceThreadId"] = "parent".into();
+        inherited["item"]["threadId"] = "parent".into();
+        assert!(state.apply_history(&request, page(vec![inherited], None)));
+        let projection = state.projection.unwrap();
+        assert_eq!(projection.visible_turn_items.len(), 2);
+        assert_eq!(projection.visible_turn_items[0].source_thread_id, "parent");
+        assert_eq!(projection.visible_turn_items[0].position, 0);
+        assert_eq!(projection.visible_turn_items[1].position, 1);
+        assert_eq!(
+            projection.turn_items.len(),
+            1,
+            "inherited items stay out of local state"
+        );
+    }
+
+    #[test]
+    fn history_does_not_resurrect_items_hidden_by_live_run_changes() {
+        let mut state = ThreadState::default();
+        state.apply(history_snapshot(
+            vec![item("c", "user_message", 3, None)],
+            "first",
+        ));
+        state.apply(ThreadStreamItem::Synchronized);
+        let request = state.history_request().unwrap();
+        state.apply(event(
+            11,
+            "run.updated",
+            json!({ "id": "old", "status": "rolled_back" }),
+        ));
+        assert!(state.apply_history(
+            &request,
+            page(
+                vec![row(0, item("a", "user_message", 1, Some("old")))],
+                None
+            )
+        ));
+        assert_eq!(ids(&state), ["c"]);
+        assert!(!state.partial);
+    }
+
+    #[test]
+    fn overlapping_pages_keep_hidden_items_hidden_and_restore_retained_interrupt_requests() {
+        let mut state = ThreadState::default();
+        state.apply(history_snapshot(
+            vec![item("c", "user_message", 3, None)],
+            "first",
+        ));
+        state.apply(ThreadStreamItem::Synchronized);
+        let request = state.history_request().unwrap();
+        let hidden = item("hidden", "user_message", 1, None);
+        let interrupt = item("interrupt", "run_interrupt_request", 2, None);
+        // Bounded snapshots retain some control items without a visible row.
+        state.projection.as_mut().unwrap().turn_items.extend([
+            serde_json::from_value(hidden.clone()).unwrap(),
+            serde_json::from_value(interrupt.clone()).unwrap(),
+        ]);
+        assert!(state.apply_history(
+            &request,
+            page(vec![row(0, hidden), row(1, interrupt)], None)
+        ));
+        assert_eq!(ids(&state), ["interrupt", "c"]);
+        assert_eq!(state.projection.as_ref().unwrap().turn_items.len(), 3);
     }
 }

@@ -4,9 +4,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use t3_client::requests::{self, PendingRequests};
@@ -16,6 +17,7 @@ use t3_client::thread::{
 
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
+use crate::tokio_bridge;
 
 /// `subscribeDynamic` retries an expected failure after 250ms; backing off
 /// keeps a thread that keeps failing from spinning.
@@ -42,6 +44,8 @@ pub struct ThreadView {
     error: Option<SharedString>,
     subscription: Option<Task<()>>,
     retry: Duration,
+    history_task: Option<Task<()>>,
+    history_error: Option<SharedString>,
     _env: Subscription,
 }
 
@@ -52,7 +56,8 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        // Row zero holds the history control, even when the entire history is loaded.
+        let scroller = cx.new(|cx| MessageScrollerState::new(1, cx));
         let this = cx.entity();
         let composer = cx.new(|cx| {
             Composer::new(
@@ -79,6 +84,8 @@ impl ThreadView {
             error: None,
             subscription: None,
             retry: RESUBSCRIBE_INITIAL,
+            history_task: None,
+            history_error: None,
             _env: observe,
         };
         view.ensure_subscribed(cx);
@@ -152,6 +159,11 @@ impl ThreadView {
     }
 
     fn apply(&mut self, item: ThreadStreamItem, cx: &mut Context<Self>) {
+        let snapshot = matches!(item, ThreadStreamItem::Snapshot { .. });
+        if snapshot {
+            self.history_task = None;
+            self.history_error = None;
+        }
         if !self.state.apply(item) {
             return;
         }
@@ -161,6 +173,56 @@ impl ThreadView {
             self.pending = requests::pending_requests(projection);
         }
         self.rebuild_rows(cx);
+        if snapshot {
+            self.remeasure_history(cx);
+        }
+        cx.notify();
+    }
+
+    fn remeasure_history(&mut self, cx: &mut Context<Self>) {
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.remeasure_items(0..1, cx);
+        });
+    }
+
+    fn load_earlier(&mut self, cx: &mut Context<Self>) {
+        if self.history_task.is_some() {
+            return;
+        }
+        let Some(request) = self.state.history_request() else {
+            return;
+        };
+        let Some(client) = self.env.read(cx).history.clone() else {
+            return;
+        };
+        let thread_id = self.thread_id.clone();
+        let cursor = request.cursor.clone();
+        let fetching =
+            tokio_bridge::spawn(cx, async move { client.page(&thread_id, &cursor).await });
+        self.history_error = None;
+        self.history_task = Some(cx.spawn(async move |this, cx| {
+            let result = fetching.await;
+            let _ = this.update(cx, |view, cx| {
+                view.history_task = None;
+                if !view.state.is_current_history_request(&request) {
+                    return;
+                }
+                match result {
+                    Ok(Ok(page)) => {
+                        view.state.apply_history(&request, page);
+                        view.rebuild_rows(cx);
+                    }
+                    Ok(Err(error)) => view.history_error = Some(error.to_string().into()),
+                    Err(error) => {
+                        view.history_error =
+                            Some(format!("Could not load earlier messages: {error}").into())
+                    }
+                }
+                view.remeasure_history(cx);
+                cx.notify();
+            });
+        }));
+        self.remeasure_history(cx);
         cx.notify();
     }
 
@@ -178,18 +240,49 @@ impl ThreadView {
             return;
         }
         let old_len = self.rows.len();
+        // Keep the unchanged suffix when a history page prepends rows. Splicing only
+        // the changed range preserves GPUI's measured rows and logical scroll anchor.
+        let suffix = self.rows[unchanged..]
+            .iter()
+            .rev()
+            .zip(entries[unchanged..].iter().rev())
+            .take_while(|(row, entry)| &row.entry == *entry)
+            .count();
+        let new_len = entries.len();
+        let prepended = old_len > 0 && unchanged == 0 && suffix == old_len;
         let rows: Vec<Row> = self.rows[..unchanged]
             .iter()
             .cloned()
-            .chain(entries.into_iter().skip(unchanged).map(|entry| Row {
-                text: row_text(&entry.content),
-                entry,
-            }))
+            .chain(
+                entries
+                    .into_iter()
+                    .skip(unchanged)
+                    .take(new_len - unchanged - suffix)
+                    .map(|entry| Row {
+                        text: row_text(&entry.content),
+                        entry,
+                    }),
+            )
+            .chain(self.rows[old_len - suffix..].iter().cloned())
             .collect();
-        let new_len = rows.len();
         self.rows = rows.into();
         self.scroller.update(cx, |scroller, cx| {
-            scroller.splice(unchanged..old_len, new_len - unchanged, cx);
+            let at_history_control = scroller.logical_scroll_top().item_ix == 0;
+            scroller.splice(
+                unchanged + 1..old_len - suffix + 1,
+                new_len - unchanged - suffix,
+                cx,
+            );
+            // The history control is not a message anchor. After clicking it at
+            // the top, keep the first previously loaded message in view.
+            if prepended && at_history_control {
+                scroller.scroll_to_item(new_len - old_len + 1, cx);
+            }
+            // The first preserved row now has a different predecessor and gap.
+            if suffix > 0 {
+                let first = new_len - suffix + 1;
+                scroller.remeasure_items(first..first + 1, cx);
+            }
         });
     }
 }
@@ -344,10 +437,50 @@ impl Render for ThreadView {
                 .into_any_element()
         } else {
             let rows = self.rows.clone();
+            let partial = self.state.partial;
+            let loading = self.history_task.is_some();
+            let history_error = self.history_error.clone();
+            let can_load =
+                self.state.history_request().is_some() && self.env.read(cx).history.is_some();
+            let this = cx.weak_entity();
             MessageScroller::new(
                 SharedString::from(format!("thread-{}", self.thread_id)),
                 self.scroller.clone(),
-                move |ix, _, cx| render_row(&rows, ix, cx),
+                move |ix, _, cx| {
+                    if ix > 0 {
+                        return render_row(&rows, ix - 1, cx);
+                    }
+                    if !partial {
+                        return div().into_any_element();
+                    }
+                    let this = this.clone();
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .pb_5()
+                        .px_6()
+                        .child(
+                            Button::new("load-earlier")
+                                .ghost()
+                                .small()
+                                .label(if loading {
+                                    "Loading earlier messages…"
+                                } else if history_error.is_some() {
+                                    "Retry loading earlier messages"
+                                } else {
+                                    "Load earlier messages"
+                                })
+                                .disabled(loading || !can_load)
+                                .on_click(move |_, _, cx| {
+                                    let _ = this.update(cx, |view, cx| view.load_earlier(cx));
+                                }),
+                        )
+                        .when_some(history_error.clone(), |column, error| {
+                            column.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                        })
+                        .into_any_element()
+                },
             )
             .with_row_style(StyleRefinement::default().pb_0())
             .with_content_style(StyleRefinement::default().pt_6().pb_8())
