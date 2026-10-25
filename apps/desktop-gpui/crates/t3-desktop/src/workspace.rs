@@ -9,12 +9,13 @@ use gpui_kit::*;
 use t3_client::shell::timestamp_ms;
 
 use crate::desktop::{
-    self, About, CloseWindow, Maximize, Minimize, PasteAsText, ResetZoom, ToggleFullscreen, ZoomIn,
-    ZoomOut,
+    self, About, CloseWindow, Maximize, Minimize, OpenSettings, PasteAsText, ResetZoom,
+    ToggleFullscreen, ZoomIn, ZoomOut,
 };
 use crate::draft_view::{DraftEvent, DraftView};
 use crate::environment::{ConnectionState, LocalEnvironment};
 use crate::project_picker::{ProjectEvent, ProjectPicker};
+use crate::settings::{self, Settings};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::thread_actions::{self, ThreadActions};
 use crate::thread_view::ThreadView;
@@ -46,6 +47,9 @@ pub struct Workspace {
     project_picker: Option<(Entity<ProjectPicker>, Subscription)>,
     pending_project: Option<String>,
     project_notice: Option<SharedString>,
+    settings: Option<(Entity<Settings>, Subscription)>,
+    settings_return_focus: Option<FocusHandle>,
+    restore_settings_focus: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -55,6 +59,12 @@ impl Workspace {
         let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), cx));
         let subscriptions = vec![
+            cx.observe_window_appearance(window, |_, window, cx| {
+                let appearance = crate::preferences::global(cx).read(cx).value.appearance;
+                if appearance == t3_host::preferences::Appearance::System {
+                    crate::preferences::apply_appearance(appearance, Some(window), cx);
+                }
+            }),
             cx.observe(&actions, |_, _, cx| cx.notify()),
             cx.observe_in(&env, window, |this, env, window, cx| {
                 let env = env.read(cx);
@@ -90,6 +100,7 @@ impl Workspace {
                     SidebarEvent::SelectionChanged => this.open_selected(window, cx),
                     SidebarEvent::NewThread => this.new_thread(window, cx),
                     SidebarEvent::AddProject => this.add_project(window, cx),
+                    SidebarEvent::Settings => this.open_settings(window, cx),
                 },
             ),
         ];
@@ -105,8 +116,30 @@ impl Workspace {
             project_picker: None,
             pending_project: None,
             project_notice: None,
+            settings: None,
+            settings_return_focus: None,
+            restore_settings_focus: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        self.settings_return_focus = window.focused(cx);
+        let settings = cx.new(|cx| Settings::new(window, cx));
+        let subscription =
+            cx.subscribe_in(&settings, window, |this, _, _: &settings::Closed, _, cx| {
+                this.settings = None;
+                this.restore_settings_focus = true;
+                cx.notify();
+            });
+        self.settings = Some((settings, subscription));
+        cx.notify();
     }
 
     /// Opens a draft in the open thread's project, else the draft's own,
@@ -115,6 +148,7 @@ impl Workspace {
         if self.actions.read(cx).has_dialog() {
             return;
         }
+        self.settings = None;
         self.project_picker = None;
         self.pending_project = None;
         self.project_notice = None;
@@ -213,6 +247,7 @@ impl Workspace {
     }
 
     fn open_project(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
         self.project_picker = None;
         let env = self.env.read(cx);
         if env.shell.project(&project_id).is_none() {
@@ -240,6 +275,7 @@ impl Workspace {
     }
 
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
         self.project_picker = None;
         self.pending_project = None;
         let selected = self.sidebar.read(cx).selected().cloned();
@@ -255,6 +291,9 @@ impl Workspace {
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some((settings, _)) = &self.settings {
+            return settings.clone().into_any_element();
+        }
         let theme = cx.theme();
         let env = self.env.read(cx);
         let thread = self
@@ -468,6 +507,14 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.restore_settings_focus {
+            self.restore_settings_focus = false;
+            let focus = self
+                .settings_return_focus
+                .take()
+                .unwrap_or_else(|| self.focus.clone());
+            window.on_next_frame(move |window, cx| focus.focus(window, cx));
+        }
         let theme = cx.theme();
         window.set_rem_size(theme.font_size * self.zoom);
         div()
@@ -475,6 +522,9 @@ impl Render for Workspace {
             .relative()
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Maximize, window, _| window.zoom_window())
