@@ -25,6 +25,24 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     let repo = repo_root();
     let home =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("t3-home-{}", std::process::id()));
+    let seeded =
+        tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
+            .current_dir(repo.join("apps/server"))
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("history-fixture.mjs"),
+            ])
+            .arg(home.join("userdata/statev2.sqlite"))
+            .arg(&home)
+            .output()
+            .await
+            .unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
     let mut backend = Backend::spawn(BackendLaunch {
         node: std::env::var_os("T3_NODE").map_or_else(|| "node".into(), PathBuf::from),
         entry: repo.join("apps/server/src/bin.ts"),
@@ -54,6 +72,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         .await
         .unwrap();
     let client = RpcClient::connect(&url).await.unwrap();
+    verifies_progressive_history(&client, &http, backend.http_base(), &token.access_token).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -238,6 +257,57 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_progressive_history(
+    client: &RpcClient,
+    http: &reqwest::Client,
+    base: &url::Url,
+    access_token: &str,
+) {
+    let mut updates = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input("history-fixture", None),
+    );
+    let mut state = ThreadState::default();
+    while !state.synchronized {
+        state.apply(updates.next().await.unwrap().unwrap());
+    }
+    let initial = state.timeline().len();
+    assert!(initial > 0 && initial < 70);
+    assert!(state.partial);
+    let sequence = state.sequence;
+    let history =
+        t3_client::history::HistoryClient::new(http.clone(), base.clone(), access_token.into());
+    let mut pages = 0;
+    while let Some(request) = state.history_request() {
+        let page = history
+            .page("history-fixture", &request.cursor)
+            .await
+            .unwrap();
+        assert_eq!(page.snapshot_sequence, sequence.unwrap());
+        assert!(state.apply_history(&request, page));
+        pages += 1;
+        assert!(pages < 10, "history must make progress");
+    }
+    assert!(pages >= 2, "exercise multiple opaque cursors");
+    assert_eq!(state.sequence, sequence, "history never skips live events");
+    assert_eq!(state.timeline().len(), 70);
+    assert_eq!(state.timeline().first().unwrap().id, "user_message-1");
+    assert_eq!(state.timeline().last().unwrap().id, "assistant_message-35");
+    assert!(!state.partial);
+    assert!(matches!(
+        history.page("history-fixture", "invalid cursor").await,
+        Err(t3_client::history::HistoryError::Status(400))
+    ));
+    let unauthenticated =
+        t3_client::history::HistoryClient::new(http.clone(), base.clone(), "invalid".into());
+    assert!(matches!(
+        unauthenticated
+            .page("history-fixture", "invalid cursor")
+            .await,
+        Err(t3_client::history::HistoryError::Status(401))
+    ));
 }
 
 async fn verifies_project_lifecycle(client: &RpcClient, home: &std::path::Path) {
