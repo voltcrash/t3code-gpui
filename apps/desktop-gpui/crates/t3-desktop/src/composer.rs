@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, StyledExt, h_flex, v_flex,
 };
@@ -17,10 +18,11 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::Value;
 use t3_client::commands;
-use t3_client::providers::NewThreadDefaults;
+use t3_client::providers::{self, NewThreadDefaults};
 use t3_client::requests::{
     self, Capability, Draft, PendingApproval, PendingRequests, PendingUserInput, Question,
 };
+use t3_client::thread::ThreadSettings;
 
 use crate::environment::LocalEnvironment;
 use crate::thread_view::ThreadView;
@@ -82,6 +84,12 @@ pub struct Composer {
     busy: bool,
     error: Option<SharedString>,
     placeholder: &'static str,
+    /// The open thread's own model and mode; `None` for a draft.
+    thread_settings: Option<ThreadSettings>,
+    /// Picks that apply from the next send; `None` keeps the thread's or
+    /// the draft's defaults.
+    picked_model: Option<Value>,
+    picked_runtime_mode: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -118,6 +126,19 @@ impl Composer {
             ];
         if let Some(thread) = thread {
             subscriptions.push(cx.observe_in(thread, window, |this, thread, window, cx| {
+                let settings = thread.read(cx).settings();
+                if settings != this.thread_settings {
+                    this.thread_settings = settings;
+                    if let Some(settings) = &this.thread_settings {
+                        if this.picked_model.as_ref() == Some(&settings.model_selection) {
+                            this.picked_model = None;
+                        }
+                        if this.picked_runtime_mode.as_ref() == Some(&settings.runtime_mode) {
+                            this.picked_runtime_mode = None;
+                        }
+                    }
+                    cx.notify();
+                }
                 let pending = thread.read(cx).pending();
                 if *pending != this.requests {
                     this.requests = pending.clone();
@@ -137,6 +158,9 @@ impl Composer {
             busy: false,
             error: None,
             placeholder: PLACEHOLDER,
+            thread_settings: None,
+            picked_model: None,
+            picked_runtime_mode: None,
             _subscriptions: subscriptions,
         };
         composer.sync(window, cx);
@@ -151,9 +175,282 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         if let Target::Draft(_) = self.target {
+            if let Target::Draft(previous) = &self.target
+                && previous.project_id != new_thread.project_id
+            {
+                self.picked_model = None;
+                self.picked_runtime_mode = None;
+                self.error = None;
+            }
             self.target = Target::Draft(new_thread);
             self.sync(window, cx);
         }
+    }
+
+    /// The model and mode a send would use without picks, and whether a
+    /// provider session can block changing models.
+    fn base_settings(&self) -> Option<(Value, String, bool)> {
+        match &self.target {
+            Target::Thread(_) => self.thread_settings.as_ref().map(|settings| {
+                (
+                    settings.model_selection.clone(),
+                    settings.runtime_mode.clone(),
+                    settings.has_runtime,
+                )
+            }),
+            Target::Draft(draft) => draft.defaults.as_ref().map(|defaults| {
+                (
+                    defaults.model_selection.clone(),
+                    defaults.runtime_mode.clone(),
+                    false,
+                )
+            }),
+        }
+    }
+
+    fn effective_model(&self) -> Option<Value> {
+        self.picked_model
+            .clone()
+            .or_else(|| self.base_settings().map(|(model, ..)| model))
+    }
+
+    fn effective_runtime_mode(&self, cx: &App) -> Option<String> {
+        let requested = self
+            .picked_runtime_mode
+            .clone()
+            .or_else(|| self.base_settings().map(|(_, mode, _)| mode))?;
+        let model = self.effective_model()?;
+        let env = self.env.read(cx);
+        let provider =
+            env.server.providers.iter().find(|provider| {
+                Some(provider.instance_id.as_str()) == model["instanceId"].as_str()
+            });
+        Some(providers::resolve_runtime_mode(provider, &requested))
+    }
+
+    /// The pick when it differs from what the thread already runs.
+    fn changed_model(&self) -> Option<Value> {
+        let (base, ..) = self.base_settings()?;
+        self.picked_model.clone().filter(|picked| *picked != base)
+    }
+
+    fn changed_runtime_mode(&self, cx: &App) -> Option<String> {
+        let (_, base, _) = self.base_settings()?;
+        self.effective_runtime_mode(cx).filter(|mode| *mode != base)
+    }
+
+    fn pick_model(&mut self, selection: Value, cx: &mut Context<Self>) {
+        let env = self.env.read(cx);
+        let Some(instance) = selection["instanceId"].as_str() else {
+            return;
+        };
+        let Some(provider) = env
+            .server
+            .providers
+            .iter()
+            .find(|provider| provider.instance_id == instance)
+        else {
+            return;
+        };
+        let enabled = env.server.settings.as_ref().is_some_and(|settings| {
+            settings.instance_enabled(self.project_id(cx).as_deref(), provider)
+        });
+        if !enabled
+            || provider.status != "ready"
+            || provider.availability.as_deref() == Some("unavailable")
+        {
+            self.error = Some("This provider is no longer available".into());
+            cx.notify();
+            return;
+        }
+        if let Some((base, _, has_runtime)) = self.base_settings()
+            && let Some(reason) =
+                providers::model_change_block(&env.server.providers, has_runtime, &base, &selection)
+        {
+            self.error = Some(reason.into());
+        } else {
+            self.error = None;
+            self.picked_model = Some(selection);
+        }
+        cx.notify();
+    }
+
+    fn selection_error(&self, cx: &App) -> Option<&'static str> {
+        let picked = self.picked_model.as_ref()?;
+        let env = self.env.read(cx);
+        if let Some((base, _, has_runtime)) = self.base_settings()
+            && let Some(reason) =
+                providers::model_change_block(&env.server.providers, has_runtime, &base, picked)
+        {
+            return Some(reason);
+        }
+        let provider =
+            env.server.providers.iter().find(|provider| {
+                Some(provider.instance_id.as_str()) == picked["instanceId"].as_str()
+            });
+        let available = provider.is_some_and(|provider| {
+            provider.status == "ready"
+                && provider.availability.as_deref() != Some("unavailable")
+                && env.server.settings.as_ref().is_some_and(|settings| {
+                    settings.instance_enabled(self.project_id(cx).as_deref(), provider)
+                })
+        });
+        (!available)
+            .then_some("This provider is no longer available. Choose another model before sending.")
+    }
+
+    fn project_id(&self, cx: &App) -> Option<String> {
+        match &self.target {
+            Target::Draft(draft) => Some(draft.project_id.clone()),
+            Target::Thread(id) => self
+                .env
+                .read(cx)
+                .shell
+                .threads
+                .get(id.as_ref())
+                .map(|thread| thread.project_id.clone()),
+        }
+    }
+
+    /// The model and runtime-mode menus, `ProviderModelPicker` and the
+    /// runtime mode control of `ComposerControlsBar`.
+    fn render_pickers(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let model = self.effective_model()?;
+        let runtime_mode = self.effective_runtime_mode(cx)?;
+        let env = self.env.read(cx);
+        let settings = env.server.settings.clone().unwrap_or_default();
+        let instance_id = model["instanceId"].as_str().unwrap_or_default().to_owned();
+        let provider = env
+            .server
+            .providers
+            .iter()
+            .find(|provider| provider.instance_id == instance_id)
+            .cloned();
+        let has_runtime = self
+            .base_settings()
+            .is_some_and(|(_, _, has_runtime)| has_runtime);
+        let started = self
+            .thread_settings
+            .as_ref()
+            .is_some_and(|settings| settings.started);
+        let base = self.base_settings()?.0;
+        let locked_instance = base["instanceId"].as_str().unwrap_or_default();
+        let locked_driver = started.then(|| {
+            if let Some(driver) = self
+                .thread_settings
+                .as_ref()
+                .and_then(|settings| settings.provider_driver.clone())
+            {
+                return driver;
+            }
+            env.server
+                .providers
+                .iter()
+                .find(|provider| provider.instance_id == locked_instance)
+                .map_or_else(
+                    || locked_instance.to_owned(),
+                    |provider| provider.driver.clone(),
+                )
+        });
+        let entries = providers::picker_providers(
+            &env.server.providers,
+            &settings,
+            self.project_id(cx).as_deref(),
+            locked_driver.as_deref(),
+        );
+        let slug = model["model"].as_str().unwrap_or_default().to_owned();
+        let model_label: SharedString = match &provider {
+            Some(provider) => format!(
+                "{} · {}",
+                provider.display_name(),
+                providers::picker_models(provider, &settings)
+                    .iter()
+                    .find(|model| model.slug == slug)
+                    .map_or_else(|| provider.model_name(&slug), |model| model.name.clone())
+            ),
+            None => slug.clone(),
+        }
+        .into();
+        let this = cx.entity().downgrade();
+        let catalog = env.server.providers.clone();
+        let model_menu = Button::new("model-picker")
+            .label(model_label.clone())
+            .tooltip(model_label)
+            .max_w_full()
+            .ghost()
+            .xsmall()
+            .dropdown_caret(true)
+            .disabled(self.busy)
+            .dropdown_menu(move |mut menu, _, _| {
+                menu = menu.max_h(px(360.)).scrollable(true);
+                for (ix, entry) in entries.iter().enumerate() {
+                    if ix > 0 {
+                        menu = menu.separator();
+                    }
+                    menu = menu.label(if entry.ready {
+                        entry.label.clone()
+                    } else {
+                        format!("{} · Unavailable", entry.label)
+                    });
+                    for candidate in &entry.models {
+                        let selection =
+                            providers::select_model(&base, &entry.instance_id, &candidate.slug);
+                        let blocked =
+                            providers::model_change_block(&catalog, has_runtime, &base, &selection);
+                        let this = this.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(candidate.name.clone())
+                                .checked(entry.instance_id == instance_id && candidate.slug == slug)
+                                .disabled(!entry.ready || blocked.is_some())
+                                .on_click(move |_, _, cx| {
+                                    let selection = selection.clone();
+                                    let _ = this.update(cx, |composer, cx| {
+                                        composer.pick_model(selection, cx)
+                                    });
+                                }),
+                        );
+                    }
+                }
+                menu
+            });
+
+        let modes = providers::runtime_modes_for(provider.as_ref());
+        let (mode_label, mode_description) = providers::runtime_mode_label(&runtime_mode);
+        let this = cx.entity().downgrade();
+        let mode_menu = Button::new("runtime-mode-picker")
+            .label(mode_label)
+            .tooltip(mode_description)
+            .ghost()
+            .xsmall()
+            .dropdown_caret(true)
+            .disabled(self.busy)
+            .dropdown_menu(move |mut menu, _, _| {
+                for mode in &modes {
+                    let (label, _) = providers::runtime_mode_label(mode);
+                    let this = this.clone();
+                    let mode = (*mode).to_owned();
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(mode == runtime_mode)
+                            .on_click(move |_, _, cx| {
+                                let mode = mode.clone();
+                                let _ = this.update(cx, |composer, cx| {
+                                    composer.picked_runtime_mode = Some(mode);
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        Some(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .gap_1()
+                .child(model_menu)
+                .child(mode_menu),
+        )
     }
 
     fn thread_id(&self) -> Option<&str> {
@@ -318,8 +615,20 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).value();
+        let sends_turn = matches!(self.mode(), Mode::Message)
+            || matches!(self.mode(), Mode::Approval(approval) if !approval.supports_feedback);
+        if sends_turn && let Some(error) = self.selection_error(cx) {
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
         if let Target::Draft(draft) = &self.target {
-            let (Some(defaults), Mode::Message) = (&draft.defaults, self.mode()) else {
+            let (Some(_), Mode::Message) = (&draft.defaults, self.mode()) else {
+                return;
+            };
+            let (Some(model_selection), Some(runtime_mode)) =
+                (self.effective_model(), self.effective_runtime_mode(cx))
+            else {
                 return;
             };
             if text.trim().is_empty() {
@@ -327,8 +636,8 @@ impl Composer {
             }
             let (thread_id, input) = commands::launch_thread(&commands::NewThread {
                 project_id: &draft.project_id,
-                model_selection: &defaults.model_selection,
-                runtime_mode: &defaults.runtime_mode,
+                model_selection: &model_selection,
+                runtime_mode: &runtime_mode,
                 text: &text,
             });
             let calls = vec![(commands::LAUNCH_THREAD, input)];
@@ -365,7 +674,12 @@ impl Composer {
                                 None,
                             )
                         })
-                        .chain([commands::send_message(&thread, &text)])
+                        .chain(commands::send_turn(
+                            &thread,
+                            &text,
+                            self.changed_model().as_ref(),
+                            self.changed_runtime_mode(cx).as_deref(),
+                        ))
                         .collect()
                 }
             }
@@ -403,7 +717,14 @@ impl Composer {
                 if text.trim().is_empty() {
                     return;
                 }
-                vec![commands::send_message(&thread, &text)]
+                // `persistThreadSettingsForNextTurn`: the mode lands
+                // before the turn that should run under it.
+                commands::send_turn(
+                    &thread,
+                    &text,
+                    self.changed_model().as_ref(),
+                    self.changed_runtime_mode(cx).as_deref(),
+                )
             }
         };
         let clears_input = !matches!(self.mode(), Mode::Question(..));
@@ -752,6 +1073,7 @@ impl Render for Composer {
         let text = self.input.read(cx).value();
         let has_text = !text.trim().is_empty();
         let can_send = self.can_send(cx);
+        let pickers = self.render_pickers(cx);
 
         let (panel, action, input_disabled) = match self.mode() {
             Mode::Approval(approval) => {
@@ -856,7 +1178,14 @@ impl Render for Composer {
                                 .appearance(false)
                                 .disabled(input_disabled),
                         )
-                        .child(h_flex().w_full().justify_end().child(action)),
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .justify_between()
+                                .child(div().flex_1().min_w_0().children(pickers))
+                                .child(div().flex_none().child(action)),
+                        ),
                 ),
         )
     }

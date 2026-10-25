@@ -121,11 +121,54 @@ pub struct ThreadProjection {
     pub runtime_requests: Vec<RuntimeRequest>,
     pub turn_items: Vec<TurnItem>,
     pub visible_turn_items: Vec<ProjectedTurnItem>,
+    #[serde(default)]
+    pub provider_sessions: Vec<ProviderSession>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSession {
+    pub id: String,
+    pub provider_instance_id: String,
+    pub driver: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadSettings {
+    pub model_selection: Value,
+    pub runtime_mode: String,
+    pub started: bool,
+    pub has_runtime: bool,
+    pub provider_driver: Option<String>,
 }
 
 impl ThreadProjection {
     fn thread_id(&self) -> Option<&str> {
         self.thread.get("id").and_then(Value::as_str)
+    }
+    pub fn settings(&self) -> Option<ThreadSettings> {
+        let has_runtime =
+            !self.runs.is_empty() || self.thread["activeProviderThreadId"].is_string();
+        let mut model_selection = self.thread.get("modelSelection")?.clone();
+        let runtime_instance = self.thread["providerInstanceId"]
+            .as_str()
+            .filter(|_| has_runtime);
+        if let Some(instance) = runtime_instance {
+            model_selection["instanceId"] = instance.into();
+        }
+        Some(ThreadSettings {
+            model_selection,
+            runtime_mode: self.thread["runtimeMode"].as_str()?.to_owned(),
+            started: has_runtime || !self.visible_turn_items.is_empty(),
+            has_runtime,
+            // A removed instance still has a session; keep its driver lock.
+            provider_driver: self
+                .provider_sessions
+                .iter()
+                .rev()
+                .find(|session| Some(session.provider_instance_id.as_str()) == runtime_instance)
+                .map(|session| session.driver.clone()),
+        })
     }
 }
 
@@ -264,6 +307,21 @@ fn apply_event(
             };
             upsert(&mut projection.attempts, attempt, |attempt| &attempt.id);
             refresh_visibility(projection);
+            true
+        }
+        "provider-session.attached" | "provider-session.updated" => {
+            let Ok(session) = serde_json::from_value::<ProviderSession>(event.payload) else {
+                return false;
+            };
+            upsert(&mut projection.provider_sessions, session, |session| {
+                &session.id
+            });
+            true
+        }
+        "provider-session.detached" => {
+            projection.provider_sessions.retain(|session| {
+                Some(session.id.as_str()) != event.payload["providerSessionId"].as_str()
+            });
             true
         }
         "runtime-request.updated" => {
@@ -878,6 +936,52 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn composer_settings_follow_the_runtime_instance_even_when_the_catalog_loses_it() {
+        let mut state = ThreadState::default();
+        state.apply(snapshot(vec![], json!([]), false));
+        let projection = state.projection.as_mut().unwrap();
+        projection.thread = json!({
+            "id": THREAD,
+            "modelSelection": { "instanceId": "codex", "model": "gpt" },
+            "runtimeMode": "auto",
+            "providerInstanceId": "work",
+            "activeProviderThreadId": null,
+        });
+        let fresh = projection.settings().unwrap();
+        assert!(!fresh.started);
+        assert!(!fresh.has_runtime);
+        assert_eq!(fresh.model_selection["instanceId"], "codex");
+        projection.thread["activeProviderThreadId"] = "native-thread".into();
+        state.apply(event(
+            11,
+            "provider-session.attached",
+            json!({
+                "id": "session", "providerInstanceId": "work", "driver": "codex",
+            }),
+        ));
+        let started = state.projection.as_ref().unwrap().settings().unwrap();
+        assert!(started.started);
+        assert!(started.has_runtime);
+        assert_eq!(started.model_selection["instanceId"], "work");
+        assert_eq!(started.provider_driver.as_deref(), Some("codex"));
+        state.apply(event(
+            12,
+            "provider-session.detached",
+            json!({ "providerSessionId": "session" }),
+        ));
+        assert!(
+            state
+                .projection
+                .as_ref()
+                .unwrap()
+                .settings()
+                .unwrap()
+                .provider_driver
+                .is_none()
+        );
     }
 
     fn event(sequence: u64, kind: &str, payload: Value) -> ThreadStreamItem {
