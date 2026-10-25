@@ -6,7 +6,7 @@ use gpui_kit::*;
 use t3_host::BackendLaunch;
 
 use crate::environment::LocalEnvironment;
-use crate::workspace::{NewThread, Workspace};
+use crate::workspace::{FindInThread, NewThread, Workspace};
 
 actions!(
     desktop,
@@ -180,6 +180,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Delete", Delete),
             MenuItem::separator(),
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            MenuItem::separator(),
+            MenuItem::action("Find in Thread", FindInThread),
         ]),
         Menu::new("View").items([
             MenuItem::action("Actual Size", ResetZoom),

@@ -17,6 +17,7 @@ use t3_client::thread::{
 
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
+use crate::thread_find::{FindEvent, FindText, ThreadFind};
 use crate::tokio_bridge;
 
 /// `subscribeDynamic` retries an expected failure after 250ms; backing off
@@ -33,6 +34,13 @@ struct Row {
     text: SharedString,
 }
 
+#[derive(Clone)]
+struct ActiveFind {
+    query: String,
+    selected: t3_client::find::Match,
+    text: Option<Entity<FindText>>,
+}
+
 pub struct ThreadView {
     env: Entity<LocalEnvironment>,
     thread_id: SharedString,
@@ -46,6 +54,11 @@ pub struct ThreadView {
     retry: Duration,
     history_task: Option<Task<()>>,
     history_error: Option<SharedString>,
+    find: Entity<ThreadFind>,
+    active_find: Option<ActiveFind>,
+    find_return_focus: Option<FocusHandle>,
+    find_reveal: bool,
+    _find_events: Subscription,
     _env: Subscription,
 }
 
@@ -59,6 +72,36 @@ impl ThreadView {
         // Row zero holds the history control, even when the entire history is loaded.
         let scroller = cx.new(|cx| MessageScrollerState::new(1, cx));
         let this = cx.entity();
+        let find = cx.new(|cx| ThreadFind::new(env.clone(), thread_id.clone(), window, cx));
+        let find_events =
+            cx.subscribe_in(&find, window, |view, _, event: &FindEvent, window, cx| {
+                match event {
+                    FindEvent::Closed => {
+                        view.active_find = None;
+                        view.find_reveal = false;
+                        if let Some(focus) = view.find_return_focus.take() {
+                            focus.focus(window, cx);
+                        }
+                    }
+                    FindEvent::Selected {
+                        query,
+                        selected,
+                        reveal,
+                    } => {
+                        if *reveal {
+                            view.history_error = None;
+                        }
+                        view.active_find = selected.clone().map(|selected| ActiveFind {
+                            query: query.clone(),
+                            selected,
+                            text: None,
+                        });
+                        view.find_reveal = *reveal;
+                        view.reveal_find(cx);
+                    }
+                }
+                cx.notify();
+            });
         let composer = cx.new(|cx| {
             Composer::new(
                 env.clone(),
@@ -86,6 +129,11 @@ impl ThreadView {
             retry: RESUBSCRIBE_INITIAL,
             history_task: None,
             history_error: None,
+            find,
+            active_find: None,
+            find_return_focus: None,
+            find_reveal: false,
+            _find_events: find_events,
             _env: observe,
         };
         view.ensure_subscribed(cx);
@@ -105,6 +153,63 @@ impl ThreadView {
 
     pub fn thread_id(&self) -> &SharedString {
         &self.thread_id
+    }
+
+    pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.find.read(cx).open {
+            self.find_return_focus = window.focused(cx);
+        }
+        self.find.update(cx, |find, cx| find.open(window, cx));
+        cx.notify();
+    }
+
+    fn reveal_find(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = &mut self.active_find else {
+            return;
+        };
+        let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| row.entry.id == active.selected.entry_id)
+        else {
+            if self.find_reveal {
+                if self.history_error.is_some() || (!self.state.partial && self.state.synchronized)
+                {
+                    self.find.update(cx, |find, cx| find.navigation_failed(cx));
+                } else {
+                    self.load_earlier(cx);
+                }
+            }
+            return;
+        };
+        let row = &self.rows[index];
+        if !matches!(
+            row.entry.content,
+            TimelineContent::Message {
+                role: Role::User,
+                ..
+            }
+        ) {
+            if let Some(text) = &active.text {
+                text.update(cx, |text, cx| text.set_source(row.text.clone(), cx));
+            } else {
+                active.text = Some(cx.new(|cx| {
+                    FindText::new(
+                        row.text.clone(),
+                        active.query.clone(),
+                        active.selected.occurrence,
+                        self.find_reveal,
+                        cx,
+                    )
+                }));
+            }
+        }
+        if self.find_reveal {
+            self.find_reveal = false;
+            self.scroller.update(cx, |scroller, cx| {
+                scroller.scroll_to_item(index + 1, cx);
+            });
+        }
     }
 
     /// Opens the stream when the environment has a socket and none is open.
@@ -173,6 +278,8 @@ impl ThreadView {
             self.pending = requests::pending_requests(projection);
         }
         self.rebuild_rows(cx);
+        self.reveal_find(cx);
+        self.find.update(cx, |find, cx| find.refresh(cx));
         if snapshot {
             self.remeasure_history(cx);
         }
@@ -197,8 +304,16 @@ impl ThreadView {
         };
         let thread_id = self.thread_id.clone();
         let cursor = request.cursor.clone();
-        let fetching =
-            tokio_bridge::spawn(cx, async move { client.page(&thread_id, &cursor).await });
+        let through = self
+            .active_find
+            .as_ref()
+            .filter(|_| self.find_reveal)
+            .map(|active| active.selected.entry_id.clone());
+        let fetching = tokio_bridge::spawn(cx, async move {
+            client
+                .page_through(&thread_id, &cursor, through.as_deref())
+                .await
+        });
         self.history_error = None;
         self.history_task = Some(cx.spawn(async move |this, cx| {
             let result = fetching.await;
@@ -219,6 +334,7 @@ impl ThreadView {
                     }
                 }
                 view.remeasure_history(cx);
+                view.reveal_find(cx);
                 cx.notify();
             });
         }));
@@ -311,9 +427,10 @@ fn gap_before(rows: &[Row], ix: usize) -> Pixels {
     }
 }
 
-fn render_row(rows: &[Row], ix: usize, cx: &App) -> AnyElement {
+fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let row = &rows[ix];
+    let active = active_find.filter(|active| active.selected.entry_id == row.entry.id);
     let id = SharedString::from(row.entry.id.clone());
     let body = match &row.entry.content {
         TimelineContent::Message {
@@ -330,7 +447,26 @@ fn render_row(rows: &[Row], ix: usize, cx: &App) -> AnyElement {
                     .bg(theme.secondary)
                     .text_sm()
                     .whitespace_normal()
-                    .child(row.text.clone()),
+                    .child(StyledText::new(row.text.clone()).with_highlights(
+                        active.into_iter().flat_map(|active| {
+                            t3_client::find::ranges(&row.text, &active.query)
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, range)| {
+                                    (
+                                        range,
+                                        HighlightStyle {
+                                            background_color: Some(
+                                                crate::thread_find::highlight_color(
+                                                    index == active.selected.occurrence,
+                                                ),
+                                            ),
+                                            ..Default::default()
+                                        },
+                                    )
+                                })
+                        }),
+                    )),
             )
             .into_any_element(),
         TimelineContent::Message {
@@ -339,7 +475,16 @@ fn render_row(rows: &[Row], ix: usize, cx: &App) -> AnyElement {
         } => div()
             .w_full()
             .text_sm()
-            .child(TextView::markdown(id, row.text.clone()).selectable(true))
+            .child(
+                active
+                    .and_then(|active| active.text.clone())
+                    .map(|view| view.into_any_element())
+                    .unwrap_or_else(|| {
+                        TextView::markdown(id, row.text.clone())
+                            .selectable(true)
+                            .into_any_element()
+                    }),
+            )
             .into_any_element(),
         TimelineContent::ProposedPlan { status, .. } => v_flex()
             .w_full()
@@ -357,9 +502,16 @@ fn render_row(rows: &[Row], ix: usize, cx: &App) -> AnyElement {
                     .when(status != "active", |header| header.child(status.clone())),
             )
             .child(
-                div()
-                    .text_sm()
-                    .child(TextView::markdown(id, row.text.clone()).selectable(true)),
+                div().text_sm().child(
+                    active
+                        .and_then(|active| active.text.clone())
+                        .map(|view| view.into_any_element())
+                        .unwrap_or_else(|| {
+                            TextView::markdown(id, row.text.clone())
+                                .selectable(true)
+                                .into_any_element()
+                        }),
+                ),
             )
             .into_any_element(),
         TimelineContent::Work {
@@ -406,7 +558,13 @@ fn render_row(rows: &[Row], ix: usize, cx: &App) -> AnyElement {
         .justify_center()
         .px_6()
         .pt(gap_before(rows, ix))
-        .child(div().w_full().max_w(CONTENT_MAX_WIDTH).child(body))
+        .child(
+            div()
+                .w_full()
+                .max_w(CONTENT_MAX_WIDTH)
+                .when(active.is_some(), |row| row.bg(theme.accent.opacity(0.1)))
+                .child(body),
+        )
         .into_any_element()
 }
 
@@ -437,6 +595,7 @@ impl Render for ThreadView {
                 .into_any_element()
         } else {
             let rows = self.rows.clone();
+            let active_find = self.active_find.clone();
             let partial = self.state.partial;
             let loading = self.history_task.is_some();
             let history_error = self.history_error.clone();
@@ -448,7 +607,7 @@ impl Render for ThreadView {
                 self.scroller.clone(),
                 move |ix, _, cx| {
                     if ix > 0 {
-                        return render_row(&rows, ix - 1, cx);
+                        return render_row(&rows, ix - 1, active_find.as_ref(), cx);
                     }
                     if !partial {
                         return div().into_any_element();
@@ -491,6 +650,7 @@ impl Render for ThreadView {
         v_flex()
             .size_full()
             .min_h_0()
+            .child(self.find.clone())
             .child(timeline)
             .when(!archived, |column| column.child(self.composer.clone()))
             .when(archived, |column| {

@@ -279,6 +279,7 @@ async fn verifies_progressive_history(
     let sequence = state.sequence;
     let history =
         t3_client::history::HistoryClient::new(http.clone(), base.clone(), access_token.into());
+    verifies_thread_find(client, &history, &state).await;
     let mut pages = 0;
     while let Some(request) = state.history_request() {
         let page = history
@@ -308,6 +309,84 @@ async fn verifies_progressive_history(
             .await,
         Err(t3_client::history::HistoryError::Status(401))
     ));
+}
+
+async fn verifies_thread_find(
+    client: &RpcClient,
+    history: &t3_client::history::HistoryClient,
+    recent: &ThreadState,
+) {
+    use t3_client::find::{self, SearchResult};
+    let mut search = find::State::default();
+    search.set_query("NEEDLE");
+    let first = search.begin(0).unwrap();
+    let result: SearchResult = client
+        .call(find::SEARCH, &first.input("history-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.total_matches, 2,
+        "search rendered text, excluding link destinations"
+    );
+    assert_eq!(result.snapshot_sequence, recent.sequence.unwrap());
+    let selected = result.selected.as_ref().unwrap();
+    assert_eq!(selected.entry_id, "assistant_message-1");
+    assert_eq!(selected.occurrence, 0);
+    assert!(
+        !recent
+            .timeline()
+            .iter()
+            .any(|entry| entry.id == selected.entry_id)
+    );
+    let cursor = recent.history_request().unwrap().cursor;
+    let targeted = history
+        .page_through("history-fixture", &cursor, Some(&selected.entry_id))
+        .await
+        .unwrap();
+    assert!(
+        targeted
+            .items
+            .iter()
+            .any(|row| row.source_item_id == selected.entry_id)
+    );
+    search.apply(&first, result);
+    let next = search.begin(1).unwrap();
+    let second: SearchResult = client
+        .call(find::SEARCH, &next.input("history-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(second.active_index, 1);
+    assert_eq!(second.selected.as_ref().unwrap().occurrence, 1);
+    search.apply(&next, second);
+    let wrap = search.begin(1).unwrap();
+    let wrapped: SearchResult = client
+        .call(find::SEARCH, &wrap.input("history-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(wrapped.active_index, 0);
+    search.apply(&wrap, wrapped);
+    let previous = search.begin(-1).unwrap();
+    let mut stream = client
+        .subscribe::<_, SearchResult>(find::SEARCH_STREAM, &previous.input("history-fixture"));
+    let mut complete = false;
+    while let Some(result) = stream.next().await {
+        let result = result.unwrap();
+        if result.complete != Some(false) {
+            assert_eq!(result.total_matches, 2);
+            assert_eq!(result.active_index, 1);
+            complete = true;
+        }
+    }
+    assert!(complete);
+    let no_matches: SearchResult = client
+        .call(
+            find::SEARCH,
+            &json!({"threadId":"history-fixture","query":"absent query"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_matches.total_matches, 0);
+    assert!(no_matches.selected.is_none());
 }
 
 async fn verifies_project_lifecycle(client: &RpcClient, home: &std::path::Path) {
