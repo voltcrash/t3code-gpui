@@ -17,12 +17,23 @@ pub enum Appearance {
     Dark,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLayout {
+    #[default]
+    Stacked,
+    Split,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub appearance: Appearance,
     pub confirm_thread_archive: bool,
     pub confirm_thread_delete: bool,
+    pub diff_layout: DiffLayout,
+    pub word_wrap: bool,
+    pub diff_ignore_whitespace: bool,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -33,6 +44,9 @@ impl Default for Preferences {
             appearance: Appearance::System,
             confirm_thread_archive: false,
             confirm_thread_delete: true,
+            diff_layout: DiffLayout::Stacked,
+            word_wrap: true,
+            diff_ignore_whitespace: true,
             extra: BTreeMap::new(),
         }
     }
@@ -129,6 +143,9 @@ mod tests {
         assert_eq!(preferences.appearance, Appearance::Dark);
         assert!(preferences.confirm_thread_delete);
         preferences.confirm_thread_archive = true;
+        preferences.diff_layout = DiffLayout::Split;
+        preferences.word_wrap = false;
+        preferences.diff_ignore_whitespace = false;
         store.save(&preferences).unwrap();
         assert_eq!(Store::new(&home.0).load().unwrap(), preferences);
         assert_eq!(fs::read(&server).unwrap(), b"server-owned");
