@@ -24,6 +24,7 @@ use t3_client::requests::{
 };
 use t3_client::thread::ThreadSettings;
 
+use crate::attachment_draft::AttachmentDraft;
 use crate::environment::LocalEnvironment;
 use crate::thread_view::ThreadView;
 use crate::tokio_bridge;
@@ -73,6 +74,7 @@ pub struct Composer {
     env: Entity<LocalEnvironment>,
     target: Target,
     input: Entity<TextareaState>,
+    attachments: Entity<AttachmentDraft>,
     requests: PendingRequests,
     /// Per request, per question.
     drafts: HashMap<String, HashMap<String, Draft>>,
@@ -113,6 +115,7 @@ impl Composer {
                 .submit_on_enter(true)
                 .placeholder(PLACEHOLDER)
         });
+        let attachments = cx.new(|_| AttachmentDraft::new(env.clone()));
         let mut subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -123,6 +126,7 @@ impl Composer {
                     }
                 }),
                 cx.observe_in(&env, window, |this, _, window, cx| this.sync(window, cx)),
+                cx.observe(&attachments, |_, _, cx| cx.notify()),
             ];
         if let Some(thread) = thread {
             subscriptions.push(cx.observe_in(thread, window, |this, thread, window, cx| {
@@ -150,6 +154,7 @@ impl Composer {
             env,
             target,
             input,
+            attachments,
             requests: PendingRequests::default(),
             drafts: HashMap::new(),
             question_index: HashMap::new(),
@@ -615,6 +620,21 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).value();
+        let attachments = if matches!(self.mode(), Mode::Message) {
+            let Some(uploads) = self.attachments.read(cx).ready() else {
+                self.error = Some(
+                    "Wait for attachments to upload, or retry or remove failed uploads.".into(),
+                );
+                cx.notify();
+                return;
+            };
+            uploads
+                .iter()
+                .map(|upload| upload.attachment.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let sends_turn = matches!(self.mode(), Mode::Message)
             || matches!(self.mode(), Mode::Approval(approval) if !approval.supports_feedback);
         if sends_turn && let Some(error) = self.selection_error(cx) {
@@ -631,7 +651,7 @@ impl Composer {
             else {
                 return;
             };
-            if text.trim().is_empty() {
+            if text.trim().is_empty() && attachments.is_empty() {
                 return;
             }
             let (thread_id, input) = commands::launch_thread(&commands::NewThread {
@@ -639,6 +659,7 @@ impl Composer {
                 model_selection: &model_selection,
                 runtime_mode: &runtime_mode,
                 text: &text,
+                attachments: &attachments,
             });
             let calls = vec![(commands::LAUNCH_THREAD, input)];
             self.run(calls, true, Some(thread_id.into()), window, cx);
@@ -679,6 +700,7 @@ impl Composer {
                             &text,
                             self.changed_model().as_ref(),
                             self.changed_runtime_mode(cx).as_deref(),
+                            &[],
                         ))
                         .collect()
                 }
@@ -714,7 +736,7 @@ impl Composer {
                 )]
             }
             Mode::Message => {
-                if text.trim().is_empty() {
+                if text.trim().is_empty() && attachments.is_empty() {
                     return;
                 }
                 // `persistThreadSettingsForNextTurn`: the mode lands
@@ -724,6 +746,7 @@ impl Composer {
                     &text,
                     self.changed_model().as_ref(),
                     self.changed_runtime_mode(cx).as_deref(),
+                    &attachments,
                 )
             }
         };
@@ -827,9 +850,25 @@ impl Composer {
         self.busy = true;
         self.error = None;
         cx.notify();
+        let sends_attachments = matches!(self.mode(), Mode::Message)
+            && calls.iter().any(|(method, input)| {
+                *method == commands::LAUNCH_THREAD || input["type"] == "message.dispatch"
+            });
+        let uploads = if sends_attachments {
+            self.attachments.read(cx).ready().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if sends_attachments {
+            self.attachments
+                .update(cx, |draft, cx| draft.set_locked(true, cx));
+        }
         let dispatched = tokio_bridge::spawn(cx, async move {
             for (method, input) in &calls {
                 rpc.call::<_, Value>(method, input).await?;
+            }
+            for upload in &uploads {
+                upload.mark_sent();
             }
             Ok::<_, t3_client::RpcError>(())
         });
@@ -840,8 +879,16 @@ impl Composer {
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
+                if sends_attachments {
+                    this.attachments
+                        .update(cx, |draft, cx| draft.set_locked(false, cx));
+                }
                 match result {
                     Ok(()) => {
+                        if sends_attachments {
+                            this.attachments
+                                .update(cx, |attachments, cx| attachments.clear(cx));
+                        }
                         if clears_input {
                             this.input.update(cx, |input, cx| input.clean(window, cx));
                         }
@@ -1071,7 +1118,10 @@ impl Render for Composer {
             (theme.danger, theme.warning, theme.border, theme.background)
         };
         let text = self.input.read(cx).value();
-        let has_text = !text.trim().is_empty();
+        let message_mode = matches!(self.mode(), Mode::Message);
+        let has_attachments = message_mode && !self.attachments.read(cx).is_empty();
+        let attachments_ready = !message_mode || self.attachments.read(cx).ready().is_some();
+        let has_text = !text.trim().is_empty() || has_attachments;
         let can_send = self.can_send(cx);
         let pickers = self.render_pickers(cx);
 
@@ -1087,7 +1137,7 @@ impl Render for Composer {
                         } else {
                             "Decline and send"
                         })
-                        .disabled(!can_send || !has_text),
+                        .disabled(!can_send || !has_text || !attachments_ready),
                     false,
                 )
             }
@@ -1137,7 +1187,7 @@ impl Render for Composer {
                     } else {
                         "Submit message"
                     })
-                    .disabled(!can_send || !has_text),
+                    .disabled(!can_send || !has_text || !attachments_ready),
                 false,
             ),
         };
@@ -1151,43 +1201,81 @@ impl Render for Composer {
             action.on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
         };
 
-        h_flex().w_full().justify_center().px_6().pb_4().child(
-            v_flex()
-                .w_full()
-                .max_w(MAX_WIDTH)
-                .gap_1()
-                .when_some(self.error.clone(), |column, error| {
-                    column.child(div().px_1().text_xs().text_color(danger).child(error))
-                })
-                .child(
-                    v_flex()
-                        .w_full()
-                        .p_2()
-                        .gap_1()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(if panel.is_some() {
-                            warning.opacity(0.5)
-                        } else {
-                            border
-                        })
-                        .bg(background)
-                        .children(panel)
-                        .child(
-                            Textarea::new(&self.input)
-                                .appearance(false)
-                                .disabled(input_disabled),
-                        )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .gap_2()
-                                .justify_between()
-                                .child(div().flex_1().min_w_0().children(pickers))
-                                .child(div().flex_none().child(action)),
-                        ),
-                ),
-        )
+        let attach_enabled = message_mode && !self.busy && self.env.read(cx).rpc.is_some();
+        h_flex()
+            .w_full()
+            .justify_center()
+            .px_6()
+            .pb_4()
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if matches!(this.mode(), Mode::Message) && !this.busy {
+                    this.attachments.update(cx, |draft, cx| {
+                        draft.add_paths(paths.0.to_vec(), window, cx)
+                    });
+                }
+            }))
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(MAX_WIDTH)
+                    .gap_1()
+                    .when_some(self.error.clone(), |column, error| {
+                        column.child(div().px_1().text_xs().text_color(danger).child(error))
+                    })
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .p_2()
+                            .gap_1()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(if panel.is_some() {
+                                warning.opacity(0.5)
+                            } else {
+                                border
+                            })
+                            .bg(background)
+                            .children(panel)
+                            .when(message_mode, |column| {
+                                column.child(self.attachments.clone())
+                            })
+                            .child(
+                                Textarea::new(&self.input)
+                                    .appearance(false)
+                                    .disabled(input_disabled || self.busy)
+                                    .on_paste({
+                                        let draft = self.attachments.clone();
+                                        move |clipboard, window, cx| {
+                                            attach_enabled
+                                                && draft.update(cx, |draft, cx| {
+                                                    draft.paste(clipboard, window, cx)
+                                                })
+                                        }
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .justify_between()
+                                    .child(
+                                        Button::new("attach-files")
+                                            .icon(Icon::new(Lucide::Paperclip))
+                                            .ghost()
+                                            .xsmall()
+                                            .tooltip("Attach files")
+                                            .accessibility_label("Attach files")
+                                            .disabled(!attach_enabled)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.attachments
+                                                    .update(cx, |draft, cx| draft.pick(window, cx));
+                                            })),
+                                    )
+                                    .child(div().flex_1().min_w_0().children(pickers))
+                                    .child(div().flex_none().child(action)),
+                            ),
+                    ),
+            )
     }
 }
 

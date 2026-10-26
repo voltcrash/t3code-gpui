@@ -9,7 +9,7 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Pin, AlarmClock, GitBranch, ArrowUp, Square, SquarePen, FolderPlus, Trash, X, Ellipsis,
-        Settings
+        Settings, Paperclip
     ]
 );
 

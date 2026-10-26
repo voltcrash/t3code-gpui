@@ -28,9 +28,14 @@ fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// `startThreadTurn` with `dispatchMode: "auto"` and no attachments. A
+/// `startThreadTurn` with server-resolved context and uploaded attachment references. A
 /// `model_selection` switches the thread's model from this turn on.
-pub fn send_message(thread_id: &str, text: &str, model_selection: Option<&Value>) -> Value {
+pub fn send_message(
+    thread_id: &str,
+    text: &str,
+    model_selection: Option<&Value>,
+    attachments: &[crate::attachments::Attachment],
+) -> Value {
     let mut command = json!({
         "type": "message.dispatch",
         "commandId": new_id(),
@@ -39,7 +44,7 @@ pub fn send_message(thread_id: &str, text: &str, model_selection: Option<&Value>
         "threadId": thread_id,
         "messageId": new_id(),
         "text": text,
-        "attachments": [],
+        "attachments": attachments,
         "deliveryIntent": "auto",
         "dispatchMode": { "type": "start_immediately" },
     });
@@ -65,11 +70,12 @@ pub fn send_turn(
     text: &str,
     model_selection: Option<&Value>,
     runtime_mode: Option<&str>,
+    attachments: &[crate::attachments::Attachment],
 ) -> Vec<Value> {
     runtime_mode
         .map(|mode| set_runtime_mode(thread_id, mode))
         .into_iter()
-        .chain([send_message(thread_id, text, model_selection)])
+        .chain([send_message(thread_id, text, model_selection, attachments)])
         .collect()
 }
 
@@ -149,6 +155,7 @@ pub struct NewThread<'a> {
     pub model_selection: &'a Value,
     pub runtime_mode: &'a str,
     pub text: &'a str,
+    pub attachments: &'a [crate::attachments::Attachment],
 }
 
 /// `startThreadTurn` for a draft: `orchestration.launchThread` creates the
@@ -169,7 +176,7 @@ pub fn launch_thread(thread: &NewThread<'_>) -> (String, Value) {
         "initialMessage": {
             "messageId": new_id(),
             "text": thread.text,
-            "attachments": [],
+            "attachments": thread.attachments,
         },
     });
     (thread_id, input)
@@ -191,8 +198,8 @@ mod tests {
 
     #[test]
     fn each_message_gets_fresh_command_and_message_ids() {
-        let first = send_message("thread-1", "hi", None);
-        let second = send_message("thread-1", "hi", None);
+        let first = send_message("thread-1", "hi", None, &[]);
+        let second = send_message("thread-1", "hi", None, &[]);
         assert_ne!(first["commandId"], second["commandId"]);
         assert_ne!(first["messageId"], second["messageId"]);
         assert_ne!(first["commandId"], first["messageId"]);
@@ -201,13 +208,19 @@ mod tests {
     #[test]
     fn a_next_turn_persists_its_mode_before_the_message_and_carries_model_options() {
         let model = json!({ "instanceId": "codex", "model": "other", "options": [{ "id": "effort", "value": "high" }] });
-        let commands = send_turn("thread-1", "hello", Some(&model), Some("approval-required"));
+        let commands = send_turn(
+            "thread-1",
+            "hello",
+            Some(&model),
+            Some("approval-required"),
+            &[],
+        );
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0]["type"], "thread.runtime-mode.set");
         assert_eq!(commands[0]["runtimeMode"], "approval-required");
         assert_eq!(commands[1]["type"], "message.dispatch");
         assert_eq!(commands[1]["modelSelection"], model);
-        let unchanged = send_turn("thread-1", "hello", None, None);
+        let unchanged = send_turn("thread-1", "hello", None, None, &[]);
         assert_eq!(unchanged.len(), 1);
         assert!(unchanged[0].get("modelSelection").is_none());
     }

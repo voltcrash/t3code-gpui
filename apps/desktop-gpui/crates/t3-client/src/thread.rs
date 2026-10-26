@@ -735,6 +735,7 @@ pub enum TimelineContent {
         role: Role,
         text: String,
         streaming: bool,
+        attachments: Vec<crate::attachments::Attachment>,
     },
     ProposedPlan {
         markdown: String,
@@ -829,11 +830,17 @@ fn entry_content(item: &TurnItem, projection: &ThreadProjection) -> TimelineCont
             role: Role::User,
             text: text(),
             streaming: false,
+            attachments: item
+                .fields
+                .get("attachments")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
         },
         "assistant_message" => TimelineContent::Message {
             role: Role::Assistant,
             text: text(),
             streaming: item.fields.get("streaming") == Some(&Value::Bool(true)),
+            attachments: Vec::new(),
         },
         "proposed_plan" => {
             let status = item
@@ -1172,6 +1179,7 @@ mod tests {
                 role: Role::Assistant,
                 text: "Hello".into(),
                 streaming: true,
+                attachments: Vec::new(),
             }
         );
     }
