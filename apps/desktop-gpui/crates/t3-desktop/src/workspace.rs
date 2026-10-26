@@ -81,9 +81,8 @@ impl Workspace {
         let Some(thread) = &self.thread else {
             return;
         };
-        let id = thread.read(cx).thread_id().clone();
         self.changes_return_focus = window.focused(cx);
-        let panel = cx.new(|cx| Changes::new(self.env.clone(), id, window, cx));
+        let panel = cx.new(|cx| Changes::new(self.env.clone(), thread.clone(), window, cx));
         let subscription = cx.subscribe_in(
             &panel,
             window,
@@ -345,9 +344,9 @@ impl Workspace {
             self.thread = selected
                 .clone()
                 .map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, window, cx)));
-            if let (Some(id), Some((panel, _))) = (selected, &self.changes) {
+            if let (Some(thread), Some((panel, _))) = (&self.thread, &self.changes) {
                 self.changes_return_focus = window.focused(cx);
-                panel.update(cx, |panel, cx| panel.set_thread(id, window, cx));
+                panel.update(cx, |panel, cx| panel.set_thread(thread.clone(), window, cx));
             } else {
                 self.changes = None;
                 self.changes_return_focus = None;

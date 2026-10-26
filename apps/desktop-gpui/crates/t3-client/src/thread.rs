@@ -6,7 +6,7 @@
 //! Timeline entries follow `deriveTimelineEntriesFromVisibleTurnItems` and
 //! `projectedWorkEntry` in `apps/web/src/session-logic.ts`. Keep them in step.
 //!
-//! Only the collections the timeline reads are kept. Events for the others
+//! Only the collections conversation and turn review read are kept. Events for the others
 //! still advance the resume sequence.
 
 use std::collections::{HashMap, HashSet};
@@ -123,6 +123,8 @@ pub struct ThreadProjection {
     pub visible_turn_items: Vec<ProjectedTurnItem>,
     #[serde(default)]
     pub provider_sessions: Vec<ProviderSession>,
+    #[serde(default)]
+    pub checkpoints: Vec<crate::checkpoint::Checkpoint>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -456,6 +458,17 @@ fn apply_event(
             };
             upsert(&mut projection.runtime_requests, request, |request| {
                 &request.id
+            });
+            true
+        }
+        "checkpoint.captured" => {
+            let Ok(checkpoint) =
+                serde_json::from_value::<crate::checkpoint::Checkpoint>(event.payload)
+            else {
+                return false;
+            };
+            upsert(&mut projection.checkpoints, checkpoint, |checkpoint| {
+                &checkpoint.id
             });
             true
         }
@@ -1223,6 +1236,36 @@ mod tests {
             json!({ "id": "run-2", "status": "rolled_back" }),
         ));
         assert_eq!(ids(&state), ["a"]);
+    }
+
+    #[test]
+    fn checkpoint_capture_updates_replace_by_id_and_snapshot_replaces_removed_turns() {
+        let mut initial = snapshot(vec![], json!([]), false);
+        let checkpoint = json!({"id":"checkpoint", "runId":"run", "appRunOrdinal":2,
+            "status":"ready", "capturedAt":"2026-10-26"});
+        if let ThreadStreamItem::Snapshot { projection, .. } = &mut initial {
+            projection.checkpoints = serde_json::from_value(json!([checkpoint])).unwrap();
+        }
+        let mut state = ThreadState::default();
+        state.apply(initial);
+        assert_eq!(
+            crate::checkpoint::turns(&state.projection.as_ref().unwrap().checkpoints)[0].count,
+            2
+        );
+        let mut stale = checkpoint;
+        stale["status"] = "stale".into();
+        assert!(state.apply(event(11, "checkpoint.captured", stale.clone())));
+        let checkpoints = &state.projection.as_ref().unwrap().checkpoints;
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].status, "stale");
+        stale["status"] = "ready".into();
+        assert!(!state.apply(event(10, "checkpoint.captured", stale)));
+        assert_eq!(
+            state.projection.as_ref().unwrap().checkpoints[0].status,
+            "stale"
+        );
+        state.apply(snapshot(vec![], json!([]), false));
+        assert!(state.projection.as_ref().unwrap().checkpoints.is_empty());
     }
 
     #[test]
