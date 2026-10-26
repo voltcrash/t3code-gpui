@@ -115,6 +115,27 @@ await Effect.runPromise(
               : { streaming: false }),
           },
         });
+        const item = events.at(-1).payload;
+        events.push({
+          id: `message-${id}`,
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id,
+            threadId,
+            runId: null,
+            nodeId: null,
+            role: type === "user_message" ? "user" : "assistant",
+            text: item.text,
+            attachments: [],
+            streaming: false,
+            createdBy: type === "user_message" ? "user" : "agent",
+            creationSource: type === "user_message" ? "web" : "provider",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
       }
     }
     const store = yield* Events.EventStoreV2;

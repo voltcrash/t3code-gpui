@@ -140,7 +140,7 @@ impl Workspace {
     pub fn new(env: Entity<LocalEnvironment>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
-        let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), window, cx));
         let subscriptions = vec![
             cx.observe_window_appearance(window, |_, window, cx| {
                 let appearance = crate::preferences::global(cx).read(cx).value.appearance;

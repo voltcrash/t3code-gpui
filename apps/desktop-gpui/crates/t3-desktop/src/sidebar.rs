@@ -6,13 +6,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::thread_actions::{self, ThreadActions};
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::base::input::Input;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use t3_client::shell::{ThreadShell, ThreadStatus, sidebar_sections, timestamp_ms};
+use t3_client::thread_search::{self, SearchResult, State as SearchState};
 
 use crate::environment::{ConnectionState, LocalEnvironment};
 use crate::format::relative_time;
@@ -53,6 +56,12 @@ struct ThreadRow {
     pinned: bool,
 }
 
+struct SearchRow {
+    thread: ThreadRow,
+    project: SharedString,
+    excerpt: Option<SharedString>,
+}
+
 #[derive(Clone)]
 enum Row {
     Thread(ThreadRow),
@@ -68,6 +77,17 @@ enum Row {
 pub struct Sidebar {
     env: Entity<LocalEnvironment>,
     selected: Option<SharedString>,
+    search_input: Entity<InputState>,
+    search: SearchState,
+    search_rows: Vec<SearchRow>,
+    search_list: ListState,
+    search_layout_dirty: bool,
+    search_index: usize,
+    search_task: Option<Task<()>>,
+    search_pending: bool,
+    search_error: Option<SharedString>,
+    search_connected: bool,
+    _search_input: Subscription,
     snoozed_expanded: bool,
     settled_expanded: bool,
     archived_expanded: bool,
@@ -86,10 +106,41 @@ impl Sidebar {
     pub fn new(
         env: Entity<LocalEnvironment>,
         actions: Entity<ThreadActions>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let actions_observe = cx.observe(&actions, |_, _, cx| cx.notify());
-        let observe = cx.observe(&env, |_, _, cx| cx.notify());
+        let observe = cx.observe(&env, |this, _, cx| {
+            let connected = this.env.read(cx).rpc.is_some();
+            if connected != this.search_connected {
+                this.search_connected = connected;
+                this.search.invalidate();
+                this.search_task = None;
+                this.search_layout_dirty = true;
+                this.schedule_search(cx);
+            }
+            cx.notify();
+        });
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search_subscription = cx.subscribe_in(
+            &search_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let value = this.search_input.read(cx).value();
+                    if this.search.set_query(&value) {
+                        this.search_task = None;
+                        this.search_index = 0;
+                        this.search_layout_dirty = true;
+                        this.schedule_search(cx);
+                        cx.notify();
+                    }
+                }
+                InputEvent::PressEnter { .. } => this.activate_search(window, cx),
+                _ => {}
+            },
+        );
+        let search_connected = env.read(cx).rpc.is_some();
         // Ages and snooze wake-ups are minute-grained, like the web sidebar.
         let clock = cx.spawn(async move |this, cx| {
             loop {
@@ -104,6 +155,17 @@ impl Sidebar {
         Self {
             env,
             selected: None,
+            search_input,
+            search: SearchState::default(),
+            search_rows: Vec::new(),
+            search_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            search_layout_dirty: false,
+            search_index: 0,
+            search_task: None,
+            search_pending: false,
+            search_error: None,
+            search_connected,
+            _search_input: search_subscription,
             snoozed_expanded: false,
             settled_expanded: false,
             archived_expanded: false,
@@ -114,6 +176,81 @@ impl Sidebar {
             scroll: UniformListScrollHandle::new(),
             _observe: observe,
             _clock: clock,
+        }
+    }
+
+    fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        self.search_pending = false;
+        self.search_error = None;
+        let Some(request) = self.search.begin() else {
+            return;
+        };
+        let Some(rpc) = self.env.read(cx).rpc.clone() else {
+            self.search_error = Some("Message search is unavailable while disconnected.".into());
+            return;
+        };
+        self.search_pending = true;
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let result = rpc
+                .call::<_, SearchResult>(thread_search::SEARCH, &request.input())
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.search.is_current(&request) {
+                    return;
+                }
+                this.search_pending = false;
+                this.search_task = None;
+                this.search_layout_dirty = true;
+                match result {
+                    Ok(result) => {
+                        this.search.apply(&request, result);
+                    }
+                    Err(error) => {
+                        this.search_error =
+                            Some(format!("Could not search messages: {}", error.detail()).into())
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_task = None;
+        self.search.set_query("");
+        self.search_pending = false;
+        self.search_error = None;
+        self.search_index = 0;
+        self.search_layout_dirty = true;
+        self.search_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn step_search(&mut self, offset: isize, cx: &mut Context<Self>) {
+        self.rebuild_rows(cx);
+        let count = self.search_rows.len();
+        if count == 0 {
+            return;
+        }
+        self.search_index =
+            (self.search_index as isize + offset).rem_euclid(count as isize) as usize;
+        self.search_list.scroll_to_reveal_item(self.search_index);
+        cx.notify();
+    }
+
+    fn activate_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.query.is_empty() {
+            return;
+        }
+        self.rebuild_rows(cx);
+        if let Some(row) = self.search_rows.get(self.search_index) {
+            let id = row.thread.id.clone();
+            self.clear_search(window, cx);
+            self.select(id, cx);
         }
     }
 
@@ -151,6 +288,56 @@ impl Sidebar {
         let now = now_ms();
         let env = self.env.read(cx);
         let sections = sidebar_sections(&env.shell, env.capabilities, now);
+        if !self.search.query.is_empty() {
+            let rows: Vec<_> = self
+                .search
+                .results(
+                    sections
+                        .pinned
+                        .iter()
+                        .chain(&sections.active)
+                        .chain(&sections.snoozed)
+                        .chain(&sections.settled)
+                        .copied(),
+                )
+                .into_iter()
+                .map(|(thread, found)| SearchRow {
+                    thread: thread_row(thread, false, now),
+                    project: env
+                        .shell
+                        .project(&thread.project_id)
+                        .map(|project| project.title.clone())
+                        .unwrap_or_default()
+                        .into(),
+                    excerpt: found.map(|found| {
+                        format!(
+                            "{}: {}",
+                            if found.source == "user" {
+                                "You"
+                            } else {
+                                "Agent"
+                            },
+                            found.snippet
+                        )
+                        .into()
+                    }),
+                })
+                .collect();
+            if self
+                .search_rows
+                .iter()
+                .map(|row| &row.thread.id)
+                .ne(rows.iter().map(|row| &row.thread.id))
+            {
+                self.search_index = 0;
+            }
+            if self.search_layout_dirty || self.search_list.item_count() != rows.len() {
+                self.search_list.reset(rows.len());
+                self.search_layout_dirty = false;
+            }
+            self.search_rows = rows;
+            return;
+        }
         let selected = self.selected.as_deref();
         let row =
             |thread: &ThreadShell, settled: bool| Row::Thread(thread_row(thread, settled, now));
@@ -246,6 +433,106 @@ impl Sidebar {
             }
         }
         self.rows = rows;
+    }
+
+    fn render_search_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let row = &self.search_rows[ix];
+        let id = row.thread.id.clone();
+        let selected = self.search_index == ix;
+        let theme = cx.theme();
+        h_flex()
+            .id(("thread-search-result", ix))
+            .w_full()
+            .min_h(px(36.))
+            .px_2p5()
+            .py_1()
+            .gap_2p5()
+            .rounded_md()
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{} · {}",
+                row.thread.title, row.project
+            )))
+            .when(selected, |row| row.bg(theme.sidebar_accent))
+            .hover(|row| row.bg(theme.sidebar_accent))
+            .child(
+                Icon::new(Lucide::FolderCode)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2p5()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_sm()
+                                    .child(row.thread.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(row.thread.time.clone()),
+                            ),
+                    )
+                    .when_some(row.excerpt.clone(), |column, excerpt| {
+                        let prefix_len = if excerpt.starts_with("You:") { 4 } else { 6 };
+                        let source_color = if prefix_len == 4 {
+                            theme.info_foreground
+                        } else {
+                            theme.success_foreground
+                        };
+                        let mut highlights = vec![(
+                            0..prefix_len,
+                            HighlightStyle {
+                                color: Some(source_color),
+                                ..Default::default()
+                            },
+                        )];
+                        highlights.extend(
+                            t3_client::find::ranges(&excerpt[prefix_len..], &self.search.query)
+                                .into_iter()
+                                .map(|range| {
+                                    (
+                                        range.start + prefix_len..range.end + prefix_len,
+                                        HighlightStyle {
+                                            color: Some(theme.foreground),
+                                            font_weight: Some(FontWeight::SEMIBOLD),
+                                            ..Default::default()
+                                        },
+                                    )
+                                }),
+                        );
+                        column.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(StyledText::new(excerpt).with_highlights(highlights)),
+                        )
+                    }),
+            )
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                if this.search_index != ix {
+                    this.search_index = ix;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.clear_search(window, cx);
+                this.select(id.clone(), cx);
+            }))
+            .into_any_element()
     }
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -410,6 +697,24 @@ impl Render for Sidebar {
             ConnectionState::Reconnecting => Some("Reconnecting…".into()),
             ConnectionState::Failed(_) => Some(SharedString::from("Server stopped")),
         };
+        let search_notice: Option<SharedString> = if self.search.query.is_empty() {
+            None
+        } else if let Some(error) = self.search_error.clone() {
+            Some(error)
+        } else if self.search.query.encode_utf16().count() > 200 {
+            Some("Use at most 200 characters to search messages.".into())
+        } else if self.search_rows.is_empty() {
+            Some(
+                if self.search_pending {
+                    "Searching thread messages…"
+                } else {
+                    "No threads found"
+                }
+                .into(),
+            )
+        } else {
+            None
+        };
         v_flex()
             .size_full()
             .bg(theme.sidebar)
@@ -419,6 +724,8 @@ impl Render for Sidebar {
             .child(
                 h_flex()
                     .h(crate::appearance::TOPBAR_HEIGHT)
+                    .w_full()
+                    .flex_none()
                     .px_3()
                     .justify_between()
                     .child(
@@ -443,43 +750,132 @@ impl Render for Sidebar {
                                     .child("Code"),
                             ),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .when_some(status, |header, status| {
-                                header.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(status),
-                                )
-                            })
-                            .child(
-                                Button::new("add-project")
-                                    .accessibility_label("Add project")
-                                    .icon(Icon::new(Lucide::FolderPlus))
-                                    .ghost()
-                                    .small()
-                                    .tooltip("Add project")
-                                    .on_click(
-                                        cx.listener(|_, _, _, cx| {
-                                            cx.emit(SidebarEvent::AddProject)
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                Button::new("new-thread")
-                                    .icon(Icon::new(Lucide::SquarePen))
-                                    .ghost()
-                                    .small()
-                                    .tooltip("New thread")
-                                    .on_click(
-                                        cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::NewThread)),
-                                    ),
-                            ),
-                    ),
+                    .child(h_flex().gap_2().when_some(status, |header, status| {
+                        header.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(status),
+                        )
+                    })),
             )
             .child(
+                h_flex()
+                    .w_full()
+                    .flex_none()
+                    .px_2()
+                    .pb_2()
+                    .gap_1()
+                    .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                        if this.search.query.is_empty() {
+                            cx.propagate();
+                        } else {
+                            this.clear_search(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                        if this.search.query.is_empty() {
+                            cx.propagate();
+                        } else {
+                            this.step_search(1, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                        if this.search.query.is_empty() {
+                            cx.propagate();
+                        } else {
+                            this.step_search(-1, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(32.))
+                            .px_2()
+                            .gap_2()
+                            .rounded_md()
+                            .cursor_text()
+                            .id("sidebar-thread-search")
+                            .role(Role::Group)
+                            .aria_label("Search threads")
+                            .hover(|style| style.bg(theme.sidebar_accent.opacity(0.5)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.search_input.update(cx, |input, cx| {
+                                        input.focus_handle(cx).focus(window, cx)
+                                    });
+                                }),
+                            )
+                            .child(
+                                Icon::new(IconName::Search)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .child(Input::new(&self.search_input)),
+                            )
+                            .when(!self.search.query.is_empty(), |field| {
+                                field.child(
+                                    Button::new("clear-thread-search")
+                                        .accessibility_label("Clear thread search")
+                                        .icon(Icon::new(Lucide::X))
+                                        .ghost()
+                                        .xsmall()
+                                        .size(px(20.))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.clear_search(window, cx)
+                                        })),
+                                )
+                            }),
+                    )
+                    .child(
+                        Button::new("add-project")
+                            .accessibility_label("Add project")
+                            .icon(Icon::new(Lucide::FolderPlus))
+                            .ghost()
+                            .small()
+                            .tooltip("Add project")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::AddProject))),
+                    )
+                    .child(
+                        Button::new("new-thread")
+                            .accessibility_label("New thread")
+                            .icon(Icon::new(Lucide::SquarePen))
+                            .ghost()
+                            .small()
+                            .tooltip("New thread")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::NewThread))),
+                    ),
+            )
+            .when_some(search_notice, |column, label| {
+                column.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+            })
+            .child(if !self.search.query.is_empty() {
+                list(
+                    self.search_list.clone(),
+                    cx.processor(|this, ix, _, cx| this.render_search_row(ix, cx)),
+                )
+                .flex_1()
+                .min_h_0()
+                .px_2()
+                .into_any_element()
+            } else {
                 uniform_list(
                     "sidebar-rows",
                     self.rows.len(),
@@ -488,11 +884,13 @@ impl Render for Sidebar {
                     }),
                 )
                 .flex_1()
+                .min_h_0()
                 .px_2()
-                .track_scroll(&self.scroll),
-            )
+                .track_scroll(&self.scroll)
+                .into_any_element()
+            })
             .child(
-                h_flex().p_2().justify_start().child(
+                h_flex().w_full().flex_none().p_2().justify_start().child(
                     Button::new("open-settings")
                         .accessibility_label("Settings")
                         .tooltip("Settings")
