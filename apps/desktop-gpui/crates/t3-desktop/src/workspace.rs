@@ -8,6 +8,7 @@ use gpui_kit::*;
 
 use t3_client::shell::timestamp_ms;
 
+use crate::changes::{self, Changes};
 use crate::desktop::{
     self, About, CloseWindow, Maximize, Minimize, OpenSettings, PasteAsText, ResetZoom,
     ToggleFullscreen, ZoomIn, ZoomOut,
@@ -25,7 +26,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 const SIDEBAR_WIDTH: Pixels = px(280.);
 const CONTEXT: &str = "Workspace";
 
-actions!(workspace, [NewThread, FindInThread]);
+actions!(workspace, [NewThread, FindInThread, ToggleChanges]);
 
 /// `chat.new` in `packages/shared/src/keybindings.ts`.
 pub fn bind_keys(cx: &mut App) {
@@ -33,6 +34,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-d", ToggleChanges, Some(CONTEXT)),
     ]);
 }
 
@@ -51,10 +53,45 @@ pub struct Workspace {
     settings: Option<(Entity<Settings>, Subscription)>,
     settings_return_focus: Option<FocusHandle>,
     restore_settings_focus: bool,
+    changes: Option<(Entity<Changes>, Subscription)>,
+    changes_return_focus: Option<FocusHandle>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
+    fn close_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.changes = None;
+        if let Some(focus) = self.changes_return_focus.take() {
+            focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        if self.changes.is_some() {
+            self.close_changes(window, cx);
+            return;
+        }
+        let Some(thread) = &self.thread else {
+            return;
+        };
+        let id = thread.read(cx).thread_id().clone();
+        self.changes_return_focus = window.focused(cx);
+        let panel = cx.new(|cx| Changes::new(self.env.clone(), id, window, cx));
+        let subscription = cx.subscribe_in(
+            &panel,
+            window,
+            |this, _, _: &changes::Closed, window, cx| this.close_changes(window, cx),
+        );
+        self.changes = Some((panel, subscription));
+        cx.notify();
+    }
     fn find_in_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_some()
             || self.project_picker.is_some()
@@ -63,6 +100,11 @@ impl Workspace {
             return;
         }
         if let Some(thread) = &self.thread {
+            // Find in Thread reveals the conversation when a narrow window shows only Changes.
+            if window.viewport_size().width < px(1150.) {
+                self.changes = None;
+                self.changes_return_focus = None;
+            }
             thread.update(cx, |thread, cx| thread.open_find(window, cx));
         }
     }
@@ -131,6 +173,8 @@ impl Workspace {
             settings: None,
             settings_return_focus: None,
             restore_settings_focus: false,
+            changes: None,
+            changes_return_focus: None,
             _subscriptions: subscriptions,
         }
     }
@@ -194,6 +238,8 @@ impl Workspace {
     }
 
     fn open_draft(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.changes = None;
+        self.changes_return_focus = None;
         let draft = cx.new(|cx| DraftView::new(self.env.clone(), project_id, window, cx));
         let subscription = cx.subscribe_in(
             &draft,
@@ -296,13 +342,21 @@ impl Workspace {
         }
         let current = self.thread.as_ref().map(|view| view.read(cx).thread_id());
         if selected.as_ref() != current {
-            self.thread =
-                selected.map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, window, cx)));
+            self.thread = selected
+                .clone()
+                .map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, window, cx)));
+            if let (Some(id), Some((panel, _))) = (selected, &self.changes) {
+                self.changes_return_focus = window.focused(cx);
+                panel.update(cx, |panel, cx| panel.set_thread(id, window, cx));
+            } else {
+                self.changes = None;
+                self.changes_return_focus = None;
+            }
         }
         cx.notify();
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_main(&self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
         if let Some((settings, _)) = &self.settings {
             return settings.clone().into_any_element();
         }
@@ -356,6 +410,17 @@ impl Workspace {
                         h_flex()
                             .ml_auto()
                             .gap_1()
+                            .child(
+                                Button::new("toggle-changes")
+                                    .label("Changes")
+                                    .ghost()
+                                    .small()
+                                    .accessibility_label("Toggle changes")
+                                    .tooltip("Toggle changes (Cmd/Ctrl+D)")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_changes(window, cx)
+                                    })),
+                            )
                             .child(
                                 Button::new("find-in-thread")
                                     .icon(gpui_kit::component::Icon::new(
@@ -417,11 +482,40 @@ impl Workspace {
                 .min_h_0()
                 .children(self.draft.as_ref().map(|(draft, _)| draft.clone()))
                 .into_any_element(),
-            (_, Some(view)) => v_flex()
-                .flex_1()
-                .min_h_0()
-                .child(view.clone())
-                .into_any_element(),
+            (_, Some(view)) => {
+                if let Some((panel, _)) = &self.changes {
+                    if width >= px(1150.) {
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .child(div().flex_1().min_w_0().h_full().child(view.clone()))
+                            .child(
+                                div()
+                                    .w(relative(0.55))
+                                    .h_full()
+                                    .min_w_0()
+                                    .border_l_1()
+                                    .border_color(theme.border)
+                                    .child(panel.clone()),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .child(panel.clone())
+                            .into_any_element()
+                    }
+                } else {
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(view.clone())
+                        .into_any_element()
+                }
+            }
             (_, None) if env.shell.projects.is_empty() => centered(
                 v_flex()
                     .items_center()
@@ -553,6 +647,9 @@ impl Render for Workspace {
                 cx.listener(|this, _: &FindInThread, window, cx| this.find_in_thread(window, cx)),
             )
             .on_action(
+                cx.listener(|this, _: &ToggleChanges, window, cx| this.toggle_changes(window, cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -595,7 +692,7 @@ impl Render for Workspace {
                             .flex_none()
                             .child(self.sidebar.clone()),
                     )
-                    .child(self.render_main(cx)),
+                    .child(self.render_main(window.viewport_size().width, cx)),
             )
             .when(self.actions.read(cx).has_dialog(), |root| {
                 root.child(

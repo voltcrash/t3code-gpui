@@ -12,6 +12,7 @@ pub mod history;
 pub mod projects;
 pub mod providers;
 pub mod requests;
+pub mod review;
 pub mod rpc;
 pub mod shell;
 pub mod thread;

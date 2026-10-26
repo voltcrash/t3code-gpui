@@ -306,7 +306,7 @@ impl ThreadShell {
         })
     }
 
-    fn latest_run_completed_at(&self) -> Option<&str> {
+    pub fn latest_run_completed_at(&self) -> Option<&str> {
         self.latest_run_id.as_ref()?;
         match &self.latest_run_completed_at {
             Some(completed_at) => completed_at.as_deref(),

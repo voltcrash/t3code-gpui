@@ -1,4 +1,5 @@
 mod assets;
+mod changes;
 mod composer;
 mod desktop;
 mod draft_view;
