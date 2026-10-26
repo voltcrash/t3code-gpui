@@ -17,6 +17,11 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "t3-wordmark.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../assets/t3-wordmark.svg"
+            ))));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -26,6 +31,7 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
+        paths.push("t3-wordmark.svg".into());
         paths.sort();
         paths.dedup();
         Ok(paths)

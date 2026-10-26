@@ -15,6 +15,7 @@ use t3_client::thread::{
     self, Role, ThreadState, ThreadStreamItem, TimelineContent, TimelineEntry, WorkStatus,
 };
 
+use crate::appearance::CONTENT_WIDTH;
 use crate::attachment_view::AttachmentView;
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
@@ -25,7 +26,6 @@ use crate::tokio_bridge;
 /// keeps a thread that keeps failing from spinning.
 const RESUBSCRIBE_INITIAL: Duration = Duration::from_millis(250);
 const RESUBSCRIBE_MAX: Duration = Duration::from_secs(5);
-const CONTENT_MAX_WIDTH: Pixels = px(768.);
 
 #[derive(Clone)]
 struct Row {
@@ -501,10 +501,10 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
             .child(
                 div()
                     .max_w(relative(0.8))
-                    .px_3()
-                    .py_2()
-                    .rounded_xl()
-                    .bg(theme.secondary)
+                    .p_3()
+                    .rounded_2xl()
+                    .bg(crate::appearance::palette(cx).color("messageSurface"))
+                    .text_color(crate::appearance::palette(cx).color("messageForeground"))
                     .text_sm()
                     .whitespace_normal()
                     .child(StyledText::new(row.text.clone()).with_highlights(
@@ -621,7 +621,7 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
         .child(
             div()
                 .w_full()
-                .max_w(CONTENT_MAX_WIDTH)
+                .max_w(CONTENT_WIDTH)
                 .when(active.is_some(), |row| row.bg(theme.accent.opacity(0.1)))
                 .child(body)
                 .children(row.attachments.iter().map(|attachment| {

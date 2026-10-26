@@ -271,7 +271,9 @@ impl Sidebar {
                             .text_color(theme.sidebar_accent_foreground)
                     })
                     .when(!selected, |row| {
-                        row.hover(|row| row.bg(theme.sidebar_accent.opacity(0.5)))
+                        row.hover(|row| {
+                            row.bg(crate::appearance::palette(cx).color("sidebarRowHover"))
+                        })
                     })
                     .child(indicator(thread.indicator, cx))
                     .child(
@@ -291,7 +293,9 @@ impl Sidebar {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(
+                                crate::appearance::palette(cx).color("sidebarMutedForeground"),
+                            )
                             .child(thread.time.clone()),
                     )
                     .child(thread_actions::button(&self.actions, &thread.id))
@@ -414,10 +418,31 @@ impl Render for Sidebar {
             .border_color(theme.sidebar_border)
             .child(
                 h_flex()
-                    .h_12()
-                    .px_4()
+                    .h(crate::appearance::TOPBAR_HEIGHT)
+                    .px_3()
                     .justify_between()
-                    .child(div().text_sm().font_semibold().child("T3 Code"))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_sm()
+                            .font_medium()
+                            .child(
+                                svg()
+                                    .path("t3-wordmark.svg")
+                                    .w(px(18.2))
+                                    .h(px(11.))
+                                    .flex_none()
+                                    .text_color(theme.sidebar_foreground),
+                            )
+                            .child(
+                                div()
+                                    .text_color(
+                                        crate::appearance::palette(cx)
+                                            .color("sidebarMutedForeground"),
+                                    )
+                                    .child("Code"),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -467,9 +492,10 @@ impl Render for Sidebar {
                 .track_scroll(&self.scroll),
             )
             .child(
-                div().p_2().child(
+                h_flex().p_2().justify_start().child(
                     Button::new("open-settings")
-                        .label("Settings")
+                        .accessibility_label("Settings")
+                        .tooltip("Settings")
                         .icon(Icon::new(Lucide::Settings))
                         .ghost()
                         .small()
