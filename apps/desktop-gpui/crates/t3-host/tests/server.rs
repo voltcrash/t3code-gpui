@@ -115,6 +115,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_checkpoint_review(&client, &checkpoint_workspace).await;
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
     verifies_planning(&client).await;
+    verifies_sidebar_search(&client).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -302,6 +303,28 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_sidebar_search(client: &RpcClient) {
+    use t3_client::thread_search::{self, SearchResult, State};
+    let mut state = State::default();
+    for (query, source) in [("needle", "assistant"), ("Question 35", "user")] {
+        state.set_query(query);
+        let request = state.begin().unwrap();
+        let result: SearchResult = client
+            .call(thread_search::SEARCH, &request.input())
+            .await
+            .unwrap();
+        let found = result
+            .matches
+            .iter()
+            .find(|found| found.thread_id == "history-fixture")
+            .unwrap();
+        assert_eq!(found.project_id, "history-project");
+        assert_eq!(found.source, source);
+        assert!(found.snippet.to_lowercase().contains(&query.to_lowercase()));
+        assert!(state.apply(&request, result));
+    }
 }
 
 async fn verifies_planning(client: &RpcClient) {
