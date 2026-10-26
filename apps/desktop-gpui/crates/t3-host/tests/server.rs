@@ -25,6 +25,8 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     let repo = repo_root();
     let home =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("t3-home-{}", std::process::id()));
+    let review_workspace = home.join("review-workspace");
+    prepare_review_workspace(&review_workspace).await;
     let seeded =
         tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
             .current_dir(repo.join("apps/server"))
@@ -34,7 +36,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
                 include_str!("history-fixture.mjs"),
             ])
             .arg(home.join("userdata/statev2.sqlite"))
-            .arg(&home)
+            .arg(&review_workspace)
             .output()
             .await
             .unwrap();
@@ -73,6 +75,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         .unwrap();
     let client = RpcClient::connect(&url).await.unwrap();
     verifies_progressive_history(&client, &http, backend.http_base(), &token.access_token).await;
+    verifies_review(&client, &review_workspace).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -257,6 +260,177 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn fixture_git(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = tokio::process::Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", cwd.join(".fixture-gitconfig"))
+        .args([
+            "-c",
+            "user.name=T3 fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+async fn prepare_review_workspace(cwd: &std::path::Path) {
+    std::fs::create_dir_all(cwd).unwrap();
+    std::fs::write(cwd.join(".fixture-gitconfig"), "").unwrap();
+    std::fs::write(cwd.join(".gitignore"), ".fixture-gitconfig\n").unwrap();
+    std::fs::write(
+        cwd.join("app.rs"),
+        "fn main() {\n    println!(\"before\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(cwd.join("spacing.rs"), "let value=1;\n").unwrap();
+    std::fs::write(cwd.join("notes.md"), "Project notes\n").unwrap();
+    std::fs::write(cwd.join("asset.bin"), [0, 1, 2, 3]).unwrap();
+    fixture_git(cwd, &["init", "--initial-branch=gpui"]).await;
+    fixture_git(cwd, &["add", "."]).await;
+    fixture_git(cwd, &["commit", "-m", "Initial fixture"]).await;
+    fixture_git(cwd, &["switch", "-c", "review-fixture"]).await;
+    fixture_git(
+        cwd,
+        &[
+            "config",
+            "branch.review-fixture.t3-merge-base-ref",
+            "refs/heads/gpui",
+        ],
+    )
+    .await;
+    std::fs::write(cwd.join("committed.md"), "A committed branch change.\n").unwrap();
+    fixture_git(cwd, &["add", "committed.md"]).await;
+    fixture_git(cwd, &["commit", "-m", "Branch change"]).await;
+    std::fs::write(
+        cwd.join("app.rs"),
+        "fn main() {\n    println!(\"after\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(cwd.join("spacing.rs"), "let value = 1;\n").unwrap();
+    std::fs::write(cwd.join("asset.bin"), [0, 4, 5, 6]).unwrap();
+    std::fs::write(cwd.join("new file.rs"), "pub fn added() {}\n").unwrap();
+    std::fs::write(
+        cwd.join("staged.md"),
+        "Staged changes are also uncommitted.\n",
+    )
+    .unwrap();
+    fixture_git(cwd, &["mv", "notes.md", "guide.md"]).await;
+    fixture_git(cwd, &["add", "staged.md"]).await;
+}
+
+async fn verifies_review(client: &RpcClient, cwd: &std::path::Path) {
+    use t3_client::review::{self, Preview, Scope};
+    let index_before = fixture_git(cwd, &["diff", "--cached", "--binary"]).await;
+    let mut state = review::State::new(true);
+    state.set_workspace(Some(cwd.to_string_lossy().into_owned()));
+    let request = state.preview_request().unwrap();
+    let preview: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    assert!(state.apply(&request, preview));
+    assert!(state.source().unwrap().diff.contains("committed.md"));
+    state.select_scope(Scope::Uncommitted);
+    let dirty = state.source().unwrap();
+    assert!(!dirty.diff.contains("committed.md"));
+    assert!(dirty.diff.contains("println!(\"after\")"));
+    assert!(
+        !dirty
+            .files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|file| file.path == "spacing.rs")
+    );
+    let renamed = dirty
+        .files
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|file| file.path == "guide.md")
+        .unwrap();
+    assert_eq!(renamed.previous_path.as_deref(), Some("notes.md"));
+    assert!(
+        dirty
+            .files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|file| file.path == "new file.rs")
+    );
+    assert!(dirty.diff.contains("Binary files"));
+    assert!(dirty.diff.contains("staged.md"));
+    state.select_file(Some("guide.md".into()));
+    let file = state.file_request().unwrap();
+    let renamed: Preview = client.call(review::PREVIEW, &file.input).await.unwrap();
+    let patch = &renamed
+        .sources
+        .iter()
+        .find(|source| source.kind == Scope::Uncommitted.kind())
+        .unwrap()
+        .diff;
+    assert!(patch.contains("rename from notes.md"));
+    assert!(!patch.contains("app.rs"));
+    state.ignore_whitespace = false;
+    let request = state.preview_request().unwrap();
+    let whitespace: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    state.apply(&request, whitespace);
+    assert!(
+        state
+            .source()
+            .unwrap()
+            .files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|file| file.path == "spacing.rs")
+    );
+    let large = format!("{}\nlast_line_sentinel\n", "large line\n".repeat(20000));
+    std::fs::write(cwd.join("large.txt"), large).unwrap();
+    let request = state.preview_request().unwrap();
+    let overview: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    state.apply(&request, overview);
+    assert!(state.source().unwrap().truncated);
+    state.select_file(Some("large.txt".into()));
+    let request = state.file_request().unwrap();
+    let file: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    let source = file
+        .sources
+        .iter()
+        .find(|source| source.kind == Scope::Uncommitted.kind())
+        .unwrap();
+    assert!(!source.truncated);
+    assert!(source.diff.contains("last_line_sentinel"));
+    std::fs::write(cwd.join("oversize.txt"), "oversize line\n".repeat(100000)).unwrap();
+    let request = state.preview_request().unwrap();
+    let overview: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    state.apply(&request, overview);
+    state.select_file(Some("oversize.txt".into()));
+    let request = state.file_request().unwrap();
+    let file: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    assert!(
+        file.sources
+            .iter()
+            .find(|source| source.kind == Scope::Uncommitted.kind())
+            .unwrap()
+            .truncated
+    );
+    assert_eq!(
+        fixture_git(cwd, &["diff", "--cached", "--binary"]).await,
+        index_before,
+        "review must not change the Git index"
+    );
 }
 
 async fn verifies_progressive_history(
