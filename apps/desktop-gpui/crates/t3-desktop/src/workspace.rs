@@ -361,6 +361,20 @@ impl Workspace {
         }
     }
 
+    pub fn open_notification_thread(
+        &mut self,
+        id: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.env.read(cx).shell.threads.contains_key(&id) {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.select(id.into(), cx));
+        } else {
+            tracing::warn!(thread_id = %id, "notification thread is no longer available");
+        }
+    }
+
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         self.project_picker = None;

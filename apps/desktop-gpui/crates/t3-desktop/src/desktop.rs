@@ -34,13 +34,18 @@ struct Desktop {
     // another server.
     env: Entity<LocalEnvironment>,
     window: Option<AnyWindowHandle>,
+    workspace: Option<Entity<Workspace>>,
 }
 
 impl Global for Desktop {}
 
 pub fn init(launch: BackendLaunch, cx: &mut App) {
     let env = cx.new(|cx| LocalEnvironment::start(launch, cx));
-    cx.set_global(Desktop { env, window: None });
+    cx.set_global(Desktop {
+        env,
+        window: None,
+        workspace: None,
+    });
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.bind_keys([
         KeyBinding::new("secondary-q", Quit, None),
@@ -77,6 +82,7 @@ pub fn init(launch: BackendLaunch, cx: &mut App) {
             .is_some_and(|window| window.window_id() == id)
         {
             desktop.window = None;
+            desktop.workspace = None;
         }
         if !cfg!(target_os = "macos") && cx.windows().is_empty() {
             cx.quit();
@@ -116,7 +122,11 @@ pub fn activate(cx: &mut App) {
         workspace.read(cx).focus_handle(cx).focus(window, cx);
         workspace
     }) {
-        Ok((window, _)) => cx.global_mut::<Desktop>().window = Some(window),
+        Ok((window, workspace)) => {
+            let desktop = cx.global_mut::<Desktop>();
+            desktop.window = Some(window);
+            desktop.workspace = Some(workspace);
+        }
         Err(error) => {
             tracing::error!("opening the desktop window failed: {error:#}");
             cx.quit();
@@ -201,4 +211,33 @@ fn menus() -> Vec<Menu> {
         menus.push(Menu::new("Help").items([MenuItem::action("About T3 Code", About)]));
     }
     menus
+}
+
+pub fn is_active(cx: &mut App) -> bool {
+    let window = cx.global::<Desktop>().window;
+    window
+        .and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| window.is_window_active())
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
+pub fn open_notification_thread(id: String, cx: &mut App) {
+    activate(cx);
+    let desktop = cx.global::<Desktop>();
+    let (Some(window), Some(workspace)) = (desktop.window, desktop.workspace.clone()) else {
+        return;
+    };
+    if window
+        .update(cx, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_notification_thread(id, window, cx)
+            });
+        })
+        .is_err()
+    {
+        tracing::warn!("could not open the notification thread: window closed");
+    }
 }

@@ -39,6 +39,7 @@ pub enum ConnectionState {
 pub struct LocalEnvironment {
     pub state: ConnectionState,
     pub shell: ShellState,
+    notifications: t3_client::notifications::Tracker,
     pub capabilities: ShellCapabilities,
     /// The live socket, for views that open their own subscriptions.
     pub rpc: Option<RpcClient>,
@@ -155,6 +156,7 @@ impl LocalEnvironment {
         Self {
             state: ConnectionState::StartingServer,
             shell: ShellState::default(),
+            notifications: Default::default(),
             capabilities: ShellCapabilities::default(),
             rpc: None,
             history: None,
@@ -256,8 +258,8 @@ async fn run(
 
         // Resuming after a reconnect replays only what was missed.
         let input = match after_sequence {
-            Some(sequence) => json!({ "afterSequence": sequence }),
-            None => json!({}),
+            Some(sequence) => json!({ "afterSequence": sequence, "requestCompletionMarker": true }),
+            None => json!({ "requestCompletionMarker": true }),
         };
         // Lives as long as this connection's shell stream.
         let _config = cx.spawn({
@@ -273,6 +275,7 @@ async fn run(
             }
         });
         let mut updates = rpc.subscribe::<_, ShellStreamItem>(shell::SUBSCRIBE, &input);
+        let mut synchronized = false;
         while let Some(item) = updates.next().await {
             match item {
                 Ok(item) => this.update(cx, |env, cx| {
@@ -283,7 +286,25 @@ async fn run(
                             "shell snapshot"
                         );
                     }
+                    if matches!(item, ShellStreamItem::Synchronized) {
+                        synchronized = true;
+                    }
+                    let snapshot = matches!(item, ShellStreamItem::Snapshot { .. });
+                    let threads_changed = snapshot
+                        || matches!(
+                            item,
+                            ShellStreamItem::ThreadUpdated { .. }
+                                | ShellStreamItem::ThreadRemoved { .. }
+                        );
                     if env.shell.apply(item) {
+                        if threads_changed {
+                            let notices = env
+                                .notifications
+                                .update(&env.shell, synchronized && !snapshot);
+                            for notice in notices {
+                                crate::notifications::present(notice, cx);
+                            }
+                        }
                         cx.notify();
                     }
                 })?,

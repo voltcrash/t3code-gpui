@@ -29,6 +29,7 @@ pub enum DiffLayout {
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub appearance: Appearance,
+    pub desktop_notifications_enabled: bool,
     pub plan_mode_enabled: bool,
     pub confirm_thread_archive: bool,
     pub confirm_thread_delete: bool,
@@ -43,6 +44,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             appearance: Appearance::System,
+            desktop_notifications_enabled: false,
             plan_mode_enabled: false,
             confirm_thread_archive: false,
             confirm_thread_delete: true,

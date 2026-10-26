@@ -10,6 +10,7 @@ mod draft_view;
 mod environment;
 mod format;
 mod launch;
+mod notifications;
 mod preferences;
 mod project_picker;
 mod settings;

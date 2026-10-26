@@ -6469,9 +6469,11 @@ name = "t3-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-channel",
  "futures-util",
  "gpui-kit",
  "image",
+ "notify-rust",
  "reqwest",
  "serde",
  "serde_json",
