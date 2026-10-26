@@ -45,6 +45,25 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         "{}",
         String::from_utf8_lossy(&seeded.stderr)
     );
+    let checkpoint_workspace = home.join("checkpoint-workspace");
+    let seeded =
+        tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
+            .current_dir(repo.join("apps/server"))
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("checkpoint-fixture.mjs"),
+            ])
+            .arg(home.join("userdata/statev2.sqlite"))
+            .arg(&checkpoint_workspace)
+            .output()
+            .await
+            .unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
     let mut backend = Backend::spawn(BackendLaunch {
         node: std::env::var_os("T3_NODE").map_or_else(|| "node".into(), PathBuf::from),
         entry: repo.join("apps/server/src/bin.ts"),
@@ -76,6 +95,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     let client = RpcClient::connect(&url).await.unwrap();
     verifies_progressive_history(&client, &http, backend.http_base(), &token.access_token).await;
     verifies_review(&client, &review_workspace).await;
+    verifies_checkpoint_review(&client, &checkpoint_workspace).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -260,6 +280,83 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_checkpoint_review(client: &RpcClient, cwd: &std::path::Path) {
+    use t3_client::checkpoint::{self, Diff};
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input("history-fixture", None),
+    );
+    let mut thread = ThreadState::default();
+    while let Some(item) = stream.next().await {
+        thread.apply(item.unwrap());
+        if thread.synchronized {
+            break;
+        }
+    }
+    let turns = checkpoint::turns(&thread.projection.as_ref().unwrap().checkpoints);
+    assert_eq!(
+        turns.iter().map(|turn| turn.count).collect::<Vec<_>>(),
+        [2, 1]
+    );
+    let mut state = t3_client::review::State::new(true);
+    // This RPC addresses the checkpoint's persisted environment-side scope, without a client cwd.
+    let request = state.checkpoint_request("history-fixture", &turns[0]);
+    let latest: Diff = client
+        .call(checkpoint::TURN_DIFF, &request.input)
+        .await
+        .unwrap();
+    assert!(latest.matches(&request.input));
+    assert!(latest.diff.contains("first checkpoint"));
+    assert!(latest.diff.contains("second checkpoint"));
+    assert!(latest.diff.contains("rename from helper.rs"));
+    assert!(latest.diff.contains("Binary files"));
+    assert!(!latest.diff.contains("live uncaptured edit"));
+    assert!(!latest.diff.contains("spacing.rs"));
+    assert!(!latest.truncated());
+    state.ignore_whitespace = false;
+    let whitespace_request = state.checkpoint_request("history-fixture", &turns[0]);
+    assert!(!state.accepts(&request));
+    let whitespace: Diff = client
+        .call(checkpoint::TURN_DIFF, &whitespace_request.input)
+        .await
+        .unwrap();
+    assert!(whitespace.diff.contains("spacing.rs"));
+    assert_ne!(whitespace.hash(), latest.hash());
+    let first_request = state.checkpoint_request("history-fixture", &turns[1]);
+    let first: Diff = client
+        .call(checkpoint::TURN_DIFF, &first_request.input)
+        .await
+        .unwrap();
+    assert!(first.diff.contains("before checkpoint"));
+    assert!(first.diff.contains("first checkpoint"));
+    assert!(!first.diff.contains("second checkpoint"));
+
+    let refs: Value =
+        serde_json::from_slice(&std::fs::read(cwd.join("refs.json")).unwrap()).unwrap();
+    let latest_ref = refs["refs"][2].as_str().unwrap();
+    fixture_git(cwd, &["update-ref", "-d", latest_ref]).await;
+    let missing = client
+        .call::<_, Diff>(checkpoint::TURN_DIFF, &request.input)
+        .await
+        .unwrap_err();
+    assert_eq!(missing.failure_tag(), Some("OrchestrationGetTurnDiffError"));
+    fixture_git(
+        cwd,
+        &[
+            "update-ref",
+            latest_ref,
+            refs["commits"][2].as_str().unwrap(),
+        ],
+    )
+    .await;
+    let restored: Diff = client
+        .call(checkpoint::TURN_DIFF, &request.input)
+        .await
+        .unwrap();
+    assert_eq!(restored.diff, latest.diff);
+    drop(stream);
 }
 
 async fn fixture_git(cwd: &std::path::Path, args: &[&str]) -> String {

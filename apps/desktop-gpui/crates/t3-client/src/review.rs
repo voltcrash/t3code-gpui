@@ -161,6 +161,22 @@ impl State {
         self.generation == request.generation
     }
 
+    pub fn invalidate(&mut self) {
+        self.generation += 1;
+    }
+
+    pub fn checkpoint_request(
+        &mut self,
+        thread_id: &str,
+        turn: &crate::checkpoint::Turn,
+    ) -> Request {
+        self.invalidate();
+        Request {
+            generation: self.generation,
+            input: crate::checkpoint::input(thread_id, turn, self.ignore_whitespace),
+        }
+    }
+
     pub fn apply(&mut self, request: &Request, preview: Preview) -> bool {
         if !self.accepts(request) {
             return false;
@@ -268,5 +284,26 @@ mod tests {
         assert_eq!(workspace(&shell, &thread), Some("D:\\project"));
         shell.projects.clear();
         assert_eq!(workspace(&shell, &thread), None);
+    }
+
+    #[test]
+    fn switching_between_checkpoint_and_workspace_review_rejects_late_patches() {
+        let mut state = State::new(true);
+        state.set_workspace(Some("/remote/project".into()));
+        let workspace = state.preview_request().unwrap();
+        let turn = crate::checkpoint::Turn {
+            checkpoint_id: "checkpoint".into(),
+            run_id: "run".into(),
+            count: 4,
+            status: "ready".into(),
+            captured_at: "2026-10-26".into(),
+        };
+        let checkpoint = state.checkpoint_request("thread", &turn);
+        assert!(!state.apply(&workspace, preview(false)));
+        state.select_scope(Scope::Uncommitted);
+        assert!(!state.accepts(&checkpoint));
+        let checkpoint = state.checkpoint_request("other-thread", &turn);
+        state.invalidate();
+        assert!(!state.accepts(&checkpoint));
     }
 }
