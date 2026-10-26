@@ -6,18 +6,20 @@
 //! typed under a question is that question's own answer.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, StyledExt, h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, StyledExt, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::Value;
 use t3_client::commands;
+use t3_client::planning::{self, ProposedPlan};
 use t3_client::providers::{self, NewThreadDefaults};
 use t3_client::requests::{
     self, Capability, Draft, PendingApproval, PendingRequests, PendingUserInput, Question,
@@ -92,6 +94,8 @@ pub struct Composer {
     /// the draft's defaults.
     picked_model: Option<Value>,
     picked_runtime_mode: Option<String>,
+    picked_interaction_mode: Option<String>,
+    proposed_plan: Option<Rc<ProposedPlan>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -127,6 +131,7 @@ impl Composer {
                 }),
                 cx.observe_in(&env, window, |this, _, window, cx| this.sync(window, cx)),
                 cx.observe(&attachments, |_, _, cx| cx.notify()),
+                cx.observe(&crate::preferences::global(cx), |_, _, cx| cx.notify()),
             ];
         if let Some(thread) = thread {
             subscriptions.push(cx.observe_in(thread, window, |this, thread, window, cx| {
@@ -140,7 +145,17 @@ impl Composer {
                         if this.picked_runtime_mode.as_ref() == Some(&settings.runtime_mode) {
                             this.picked_runtime_mode = None;
                         }
+                        if this.picked_interaction_mode.as_ref() == Some(&settings.interaction_mode)
+                        {
+                            this.picked_interaction_mode = None;
+                        }
                     }
+                    cx.notify();
+                }
+                let proposed = thread.read(cx).proposed_plan();
+                if proposed.as_ref().map(Rc::as_ptr) != this.proposed_plan.as_ref().map(Rc::as_ptr)
+                {
+                    this.proposed_plan = proposed;
                     cx.notify();
                 }
                 let pending = thread.read(cx).pending();
@@ -166,6 +181,8 @@ impl Composer {
             thread_settings: None,
             picked_model: None,
             picked_runtime_mode: None,
+            picked_interaction_mode: None,
+            proposed_plan: None,
             _subscriptions: subscriptions,
         };
         composer.sync(window, cx);
@@ -185,6 +202,7 @@ impl Composer {
             {
                 self.picked_model = None;
                 self.picked_runtime_mode = None;
+                self.picked_interaction_mode = None;
                 self.error = None;
             }
             self.target = Target::Draft(new_thread);
@@ -231,6 +249,77 @@ impl Composer {
                 Some(provider.instance_id.as_str()) == model["instanceId"].as_str()
             });
         Some(providers::resolve_runtime_mode(provider, &requested))
+    }
+
+    fn plan_mode_enabled(&self, cx: &App) -> bool {
+        let model = self.effective_model();
+        let env = self.env.read(cx);
+        let provider = env.server.providers.iter().find(|provider| {
+            Some(provider.instance_id.as_str())
+                == model
+                    .as_ref()
+                    .and_then(|model| model["instanceId"].as_str())
+        });
+        planning::enabled(
+            crate::preferences::global(cx)
+                .read(cx)
+                .value
+                .plan_mode_enabled,
+            provider,
+        )
+    }
+
+    fn effective_interaction_mode(&self, cx: &App) -> &'static str {
+        let requested = self
+            .picked_interaction_mode
+            .as_deref()
+            .or_else(|| {
+                self.thread_settings
+                    .as_ref()
+                    .map(|settings| settings.interaction_mode.as_str())
+            })
+            .unwrap_or("default");
+        if self.plan_mode_enabled(cx) && requested == "plan" {
+            "plan"
+        } else {
+            "default"
+        }
+    }
+
+    fn changed_interaction_mode(&self, cx: &App) -> Option<&'static str> {
+        let mode = self.effective_interaction_mode(cx);
+        (self
+            .thread_settings
+            .as_ref()
+            .map(|settings| settings.interaction_mode.as_str())
+            != Some(mode))
+        .then_some(mode)
+    }
+
+    pub fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.busy || !self.plan_mode_enabled(cx) {
+            return false;
+        }
+        self.picked_interaction_mode = Some(
+            if self.effective_interaction_mode(cx) == "plan" {
+                "default"
+            } else {
+                "plan"
+            }
+            .into(),
+        );
+        self.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn plan_follow_up(&self, cx: &App) -> Option<&ProposedPlan> {
+        (matches!(self.mode(), Mode::Message)
+            && self.effective_interaction_mode(cx) == "plan"
+            && !self.is_running(cx)
+            && self.attachments.read(cx).is_empty())
+        .then_some(self.proposed_plan.as_deref())
+        .flatten()
     }
 
     /// The pick when it differs from what the thread already runs.
@@ -454,7 +543,26 @@ impl Composer {
                 .flex_wrap()
                 .gap_1()
                 .child(model_menu)
-                .child(mode_menu),
+                .child(mode_menu)
+                .when(self.plan_mode_enabled(cx), |row| {
+                    row.child(
+                        Button::new("interaction-mode")
+                            .label(if self.effective_interaction_mode(cx) == "plan" {
+                                "Plan"
+                            } else {
+                                "Build"
+                            })
+                            .ghost()
+                            .xsmall()
+                            .selected(self.effective_interaction_mode(cx) == "plan")
+                            .accessibility_label("Toggle Plan mode")
+                            .tooltip("Toggle Plan/Build (Shift+Tab)")
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_plan_mode(window, cx);
+                            })),
+                    )
+                }),
         )
     }
 
@@ -658,6 +766,7 @@ impl Composer {
                 project_id: &draft.project_id,
                 model_selection: &model_selection,
                 runtime_mode: &runtime_mode,
+                interaction_mode: self.effective_interaction_mode(cx),
                 text: &text,
                 attachments: &attachments,
             });
@@ -700,6 +809,7 @@ impl Composer {
                             &text,
                             self.changed_model().as_ref(),
                             self.changed_runtime_mode(cx).as_deref(),
+                            self.changed_interaction_mode(cx),
                             &[],
                         ))
                         .collect()
@@ -736,6 +846,17 @@ impl Composer {
                 )]
             }
             Mode::Message => {
+                if let Some(plan) = self.plan_follow_up(cx) {
+                    let commands = commands::plan_follow_up(
+                        &thread,
+                        plan,
+                        &text,
+                        self.changed_model().as_ref(),
+                        self.changed_runtime_mode(cx).as_deref(),
+                    );
+                    self.dispatch(commands, true, window, cx);
+                    return;
+                }
                 if text.trim().is_empty() && attachments.is_empty() {
                     return;
                 }
@@ -746,6 +867,7 @@ impl Composer {
                     &text,
                     self.changed_model().as_ref(),
                     self.changed_runtime_mode(cx).as_deref(),
+                    self.changed_interaction_mode(cx),
                     &attachments,
                 )
             }
@@ -886,6 +1008,7 @@ impl Composer {
                 match result {
                     Ok(()) => {
                         if sends_attachments {
+                            this.picked_interaction_mode = None;
                             this.attachments
                                 .update(cx, |attachments, cx| attachments.clear(cx));
                         }
@@ -1124,6 +1247,7 @@ impl Render for Composer {
         let has_text = !text.trim().is_empty() || has_attachments;
         let can_send = self.can_send(cx);
         let pickers = self.render_pickers(cx);
+        let plan_follow_up = self.plan_follow_up(cx).is_some();
 
         let (panel, action, input_disabled) = match self.mode() {
             Mode::Approval(approval) => {
@@ -1169,6 +1293,18 @@ impl Render for Composer {
                             .is_some_and(|question| !question.allows_custom_answer()),
                 )
             }
+            Mode::Message if plan_follow_up => (
+                None,
+                Button::new("send")
+                    .label(if has_text { "Refine" } else { "Implement" })
+                    .tooltip(if has_text {
+                        "Refine the proposed plan"
+                    } else {
+                        "Implement the proposed plan in this thread"
+                    })
+                    .disabled(!can_send),
+                false,
+            ),
             Mode::Message if self.is_running(cx) && !has_text => (
                 None,
                 Button::new("stop")
@@ -1207,6 +1343,9 @@ impl Render for Composer {
             .justify_center()
             .px_6()
             .pb_4()
+            .when(self.plan_mode_enabled(cx), |row| {
+                row.key_context("NativePlanComposer")
+            })
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if matches!(this.mode(), Mode::Message) && !this.busy {
                     this.attachments.update(cx, |draft, cx| {
@@ -1236,6 +1375,7 @@ impl Render for Composer {
                             })
                             .bg(background)
                             .children(panel)
+                            .when(plan_follow_up, |column| column.child(div().px_1().text_xs().text_color(cx.theme().muted_foreground).child("Plan ready. Add feedback to refine it, or implement it.")))
                             .when(message_mode, |column| {
                                 column.child(self.attachments.clone())
                             })

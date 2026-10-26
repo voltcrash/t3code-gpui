@@ -61,6 +61,7 @@ pub struct ThreadView {
     find_return_focus: Option<FocusHandle>,
     find_reveal: bool,
     checkpoints: Rc<[t3_client::checkpoint::Turn]>,
+    proposed_plan: Option<Rc<t3_client::planning::ProposedPlan>>,
     _find_events: Subscription,
     _env: Subscription,
 }
@@ -137,6 +138,7 @@ impl ThreadView {
             find_return_focus: None,
             find_reveal: false,
             checkpoints: Rc::from([]),
+            proposed_plan: None,
             _find_events: find_events,
             _env: observe,
         };
@@ -161,6 +163,26 @@ impl ThreadView {
 
     pub fn checkpoints(&self) -> Rc<[t3_client::checkpoint::Turn]> {
         self.checkpoints.clone()
+    }
+
+    pub fn proposed_plan(&self) -> Option<Rc<t3_client::planning::ProposedPlan>> {
+        self.proposed_plan.clone()
+    }
+
+    pub fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.composer
+            .update(cx, |composer, cx| composer.toggle_plan_mode(window, cx))
+    }
+
+    fn refresh_proposed_plan(&mut self) {
+        let plan = self
+            .state
+            .projection
+            .as_ref()
+            .and_then(t3_client::planning::active_plan);
+        if self.proposed_plan.as_deref() != plan.as_ref() {
+            self.proposed_plan = plan.map(Rc::new);
+        }
     }
 
     pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -273,6 +295,8 @@ impl ThreadView {
 
     fn apply(&mut self, item: ThreadStreamItem, cx: &mut Context<Self>) {
         let snapshot = matches!(item, ThreadStreamItem::Snapshot { .. });
+        let plan_changed = snapshot
+            || matches!(&item, ThreadStreamItem::Event { event, .. } if event.kind == "plan.updated" || event.kind == "run.created" || event.kind == "run.updated" || (event.kind == "turn-item.updated" && event.payload["type"] == "proposed_plan"));
         let checkpoints_changed = snapshot
             || matches!(&item,
             ThreadStreamItem::Event { event, .. } if event.kind == "checkpoint.captured");
@@ -290,6 +314,9 @@ impl ThreadView {
             if checkpoints_changed {
                 self.checkpoints = t3_client::checkpoint::turns(&projection.checkpoints).into();
             }
+        }
+        if plan_changed {
+            self.refresh_proposed_plan();
         }
         self.rebuild_rows(cx);
         self.reveal_find(cx);
@@ -339,6 +366,7 @@ impl ThreadView {
                 match result {
                     Ok(Ok(page)) => {
                         view.state.apply_history(&request, page);
+                        view.refresh_proposed_plan();
                         view.rebuild_rows(cx);
                     }
                     Ok(Err(error)) => view.history_error = Some(error.to_string().into()),

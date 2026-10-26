@@ -29,6 +29,7 @@ pub enum DiffLayout {
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub appearance: Appearance,
+    pub plan_mode_enabled: bool,
     pub confirm_thread_archive: bool,
     pub confirm_thread_delete: bool,
     pub diff_layout: DiffLayout,
@@ -42,6 +43,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             appearance: Appearance::System,
+            plan_mode_enabled: false,
             confirm_thread_archive: false,
             confirm_thread_delete: true,
             diff_layout: DiffLayout::Stacked,
@@ -124,6 +126,7 @@ mod tests {
         let home = Fixture::new();
         let store = Store::new(&home.0);
         assert_eq!(store.load().unwrap(), Preferences::default());
+        assert!(!store.load().unwrap().plan_mode_enabled);
         assert!(!home.0.exists());
     }
 
@@ -143,6 +146,7 @@ mod tests {
         assert_eq!(preferences.appearance, Appearance::Dark);
         assert!(preferences.confirm_thread_delete);
         preferences.confirm_thread_archive = true;
+        preferences.plan_mode_enabled = true;
         preferences.diff_layout = DiffLayout::Split;
         preferences.word_wrap = false;
         preferences.diff_ignore_whitespace = false;
