@@ -1,3 +1,4 @@
+mod appearance;
 mod assets;
 mod attachment_draft;
 mod attachment_image;
@@ -42,6 +43,7 @@ fn main() -> anyhow::Result<()> {
     app.on_reopen(desktop::activate);
     app.run(move |cx| {
         gpui_kit::init(cx);
+        appearance::init(cx);
         cx.set_global(Tokio(runtime));
         workspace::bind_keys(cx);
         preferences::init(preference_store, loaded_preferences, cx);

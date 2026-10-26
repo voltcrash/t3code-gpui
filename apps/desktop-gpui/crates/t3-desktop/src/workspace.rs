@@ -8,6 +8,7 @@ use gpui_kit::*;
 
 use t3_client::shell::timestamp_ms;
 
+use crate::appearance::{SIDEBAR_WIDTH, TOPBAR_HEIGHT};
 use crate::changes::{self, Changes};
 use crate::desktop::{
     self, About, CloseWindow, Maximize, Minimize, OpenSettings, PasteAsText, ResetZoom,
@@ -23,7 +24,6 @@ use crate::thread_view::ThreadView;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 
-const SIDEBAR_WIDTH: Pixels = px(280.);
 const CONTEXT: &str = "Workspace";
 
 actions!(
@@ -398,12 +398,13 @@ impl Workspace {
             .and_then(|id| env.thread(id.as_ref()));
 
         let header = h_flex()
-            .h_12()
+            .h(TOPBAR_HEIGHT)
             .flex_none()
             .px_4()
             .gap_2()
             .border_b_1()
-            .border_color(theme.border);
+            .bg(crate::appearance::palette(cx).color("toolbar"))
+            .border_color(crate::appearance::palette(cx).color("toolbarBorder"));
         let header = match (thread, &self.draft) {
             (_, Some(_)) => header.child(div().text_sm().font_medium().child("New thread")),
             (Some(thread), None) => {
