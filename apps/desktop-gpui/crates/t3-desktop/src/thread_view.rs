@@ -15,6 +15,7 @@ use t3_client::thread::{
     self, Role, ThreadState, ThreadStreamItem, TimelineContent, TimelineEntry, WorkStatus,
 };
 
+use crate::attachment_view::AttachmentView;
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
 use crate::thread_find::{FindEvent, FindText, ThreadFind};
@@ -32,6 +33,7 @@ struct Row {
     /// Kept across rebuilds while the entry is unchanged, so the markdown view
     /// recognizes its text without comparing it.
     text: SharedString,
+    attachments: Vec<Entity<AttachmentView>>,
 }
 
 #[derive(Clone)]
@@ -386,9 +388,27 @@ impl ThreadView {
                     .into_iter()
                     .skip(unchanged)
                     .take(new_len - unchanged - suffix)
-                    .map(|entry| Row {
-                        text: row_text(&entry.content),
-                        entry,
+                    .map(|entry| {
+                        let attachments = match &entry.content {
+                            TimelineContent::Message { attachments, .. } => attachments
+                                .iter()
+                                .map(|attachment| {
+                                    cx.new(|cx| {
+                                        AttachmentView::new(
+                                            self.env.clone(),
+                                            attachment.clone(),
+                                            cx,
+                                        )
+                                    })
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        Row {
+                            text: row_text(&entry.content),
+                            entry,
+                            attachments,
+                        }
                     }),
             )
             .chain(self.rows[old_len - suffix..].iter().cloned())
@@ -575,7 +595,15 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
                 .w_full()
                 .max_w(CONTENT_MAX_WIDTH)
                 .when(active.is_some(), |row| row.bg(theme.accent.opacity(0.1)))
-                .child(body),
+                .child(body)
+                .children(row.attachments.iter().map(|attachment| {
+                    h_flex().w_full().justify_end().mt_2().child(
+                        div()
+                            .w_full()
+                            .max_w(relative(0.8))
+                            .child(attachment.clone()),
+                    )
+                })),
         )
         .into_any_element()
 }

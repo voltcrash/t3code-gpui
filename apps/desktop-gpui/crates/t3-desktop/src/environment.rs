@@ -43,6 +43,7 @@ pub struct LocalEnvironment {
     /// The live socket, for views that open their own subscriptions.
     pub rpc: Option<RpcClient>,
     pub history: Option<t3_client::history::HistoryClient>,
+    pub attachments: Option<t3_client::attachments::Client>,
     /// The server resolves send and stop commands (`commands::supported`).
     pub commands_supported: bool,
     pub thread_actions: t3_client::thread_actions::Capabilities,
@@ -133,12 +134,20 @@ impl LocalEnvironment {
         // the graceful stop instead of leaving agents running.
         let quit = cx.on_app_quit({
             let backend = backend.clone();
-            move |_, cx| {
+            move |this, cx| {
+                let attachments = this.attachments.clone();
                 let backend = backend.lock().expect("backend lock").take();
                 if let Some(backend) = backend {
-                    cx.global::<Tokio>()
-                        .0
-                        .block_on(backend.shutdown(SHUTDOWN_GRACE));
+                    cx.global::<Tokio>().0.block_on(async move {
+                        if let Some(attachments) = attachments {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(1),
+                                attachments.discard_pending(),
+                            )
+                            .await;
+                        }
+                        backend.shutdown(SHUTDOWN_GRACE).await;
+                    });
                 }
                 async {}
             }
@@ -149,6 +158,7 @@ impl LocalEnvironment {
             capabilities: ShellCapabilities::default(),
             rpc: None,
             history: None,
+            attachments: None,
             commands_supported: false,
             thread_actions: Default::default(),
             archives: Default::default(),
@@ -199,14 +209,14 @@ async fn run(
         let connecting = cx
             .update(|cx| tokio_bridge::spawn(cx, connect(http.clone(), http_base.clone(), token)));
         let connected = match connecting.await? {
-            Ok((rpc, history)) => rpc
+            Ok((rpc, history, attachments)) => rpc
                 .call::<_, Value>("server.getConfig", &json!({}))
                 .await
-                .map(|config| (rpc, history, config))
+                .map(|config| (rpc, history, attachments, config))
                 .map_err(anyhow::Error::from),
             Err(error) => Err(error),
         };
-        let (rpc, history, config) = match connected {
+        let (rpc, history, attachments, config) = match connected {
             Ok(connected) => connected,
             Err(error) => {
                 tracing::warn!("connecting failed: {error:#}");
@@ -227,6 +237,9 @@ async fn run(
             env.state = ConnectionState::Connected;
             env.rpc = Some(rpc.clone());
             env.history = Some(history);
+            let attachments = env.attachments.clone().unwrap_or(attachments);
+            attachments.reconnected(&rpc);
+            env.attachments = Some(attachments);
             env.archive_task = None;
             if env.archive_requested {
                 env.load_archives(cx);
@@ -316,7 +329,11 @@ async fn connect(
     http: reqwest::Client,
     http_base: Url,
     bootstrap_token: String,
-) -> anyhow::Result<(RpcClient, t3_client::history::HistoryClient)> {
+) -> anyhow::Result<(
+    RpcClient,
+    t3_client::history::HistoryClient,
+    t3_client::attachments::Client,
+)> {
     let metadata = ClientMetadata {
         label: CLIENT_LABEL.into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
@@ -324,8 +341,9 @@ async fn connect(
     let access =
         auth::exchange_bootstrap_credential(&http, &http_base, &bootstrap_token, &metadata).await?;
     let url = auth::websocket_url(&http, &http_base, &access.access_token, &metadata).await?;
+    let attachments = t3_client::attachments::Client::new(http.clone(), http_base.clone());
     let history = t3_client::history::HistoryClient::new(http, http_base, access.access_token);
-    Ok((RpcClient::connect(&url).await?, history))
+    Ok((RpcClient::connect(&url).await?, history, attachments))
 }
 
 fn set_state(

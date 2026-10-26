@@ -3,6 +3,7 @@
 //! require a server change.
 
 pub mod archives;
+pub mod attachments;
 pub mod auth;
 pub mod bootstrap_token;
 pub mod checkpoint;

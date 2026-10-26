@@ -6471,6 +6471,7 @@ dependencies = [
  "anyhow",
  "futures-util",
  "gpui-kit",
+ "image",
  "reqwest",
  "serde",
  "serde_json",
