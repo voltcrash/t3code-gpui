@@ -96,6 +96,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_progressive_history(&client, &http, backend.http_base(), &token.access_token).await;
     verifies_review(&client, &review_workspace).await;
     verifies_checkpoint_review(&client, &checkpoint_workspace).await;
+    verifies_attachments(&client, &http, backend.http_base(), &home).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -124,6 +125,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
             missing,
             "hello",
             Some(&json!({ "instanceId": "codex", "model": "gpt-6-astra" })),
+            &[],
         ),
         t3_client::commands::set_runtime_mode(missing, "approval-required"),
         t3_client::commands::respond_to_approval(missing, "request", "decline", Some("no")),
@@ -261,6 +263,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         model_selection: &json!({ "instanceId": "codex", "model": "gpt-6-astra" }),
         runtime_mode: "full-access",
         text: "hello",
+        attachments: &[],
     });
     let rejected = client
         .call::<_, Value>(t3_client::commands::LAUNCH_THREAD, &launch)
@@ -280,6 +283,163 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_attachments(
+    client: &RpcClient,
+    http: &reqwest::Client,
+    base: &url::Url,
+    home: &std::path::Path,
+) {
+    use t3_client::attachments::{self, Client, Metadata};
+    let transfer = Client::new(http.clone(), base.clone());
+    let bytes = b"A fixture attachment with spaces in its name.\n".to_vec();
+    let uploaded = transfer
+        .upload(
+            client,
+            attachments::metadata("notes with spaces.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transfer
+            .download(client, &uploaded.attachment)
+            .await
+            .unwrap(),
+        bytes
+    );
+    let orphan = uploaded.attachment.clone();
+    uploaded.discard().await.unwrap();
+    assert!(
+        transfer.download(client, &orphan).await.is_err(),
+        "removing a draft discards its pending upload"
+    );
+    let shutdown_upload = transfer
+        .upload(
+            client,
+            attachments::metadata("shutdown.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    transfer.discard_pending().await;
+    assert!(
+        transfer
+            .download(client, &shutdown_upload.attachment)
+            .await
+            .is_err(),
+        "shutdown cleanup releases uploads while their draft owners still exist"
+    );
+    drop(shutdown_upload);
+
+    let pending = transfer
+        .upload(
+            client,
+            attachments::metadata("notes.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    let references = [pending.attachment.clone()];
+    let mut command = t3_client::commands::send_message("history-fixture", "", None, &references);
+    command["dispatchMode"] = json!({"type":"defer_start"});
+    // Persist the message without releasing its prepared run or starting a provider.
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input("history-fixture", None),
+    );
+    let mut state = ThreadState::default();
+    while let Some(item) = stream.next().await {
+        state.apply(item.unwrap());
+        if state.synchronized {
+            break;
+        }
+    }
+    t3_client::commands::dispatch(client, &command)
+        .await
+        .unwrap();
+    pending.mark_sent();
+    let persisted = loop {
+        let item = stream.next().await.unwrap().unwrap();
+        state.apply(item);
+        let found = state
+            .projection
+            .as_ref()
+            .unwrap()
+            .turn_items
+            .iter()
+            .find(|item| item.str("messageId") == command["messageId"].as_str());
+        if let Some(item) = found {
+            let attachments: Vec<attachments::Attachment> =
+                serde_json::from_value(item.fields["attachments"].clone()).unwrap();
+            break attachments.into_iter().next().unwrap();
+        }
+    };
+    assert_ne!(
+        persisted.id, pending.attachment.id,
+        "server claims the pending upload into the thread"
+    );
+    assert_eq!(persisted.name, "notes.txt");
+    assert_eq!(transfer.download(client, &persisted).await.unwrap(), bytes);
+    drop(pending);
+    assert_eq!(
+        transfer.download(client, &persisted).await.unwrap(),
+        bytes,
+        "dropping the sent draft cannot delete a persisted attachment"
+    );
+    assert!(state.timeline().iter().any(|row| matches!(&row.content, t3_client::thread::TimelineContent::Message { attachments, .. } if attachments.iter().any(|attachment| attachment.id == persisted.id))));
+    drop(stream);
+    t3_client::commands::dispatch(client, &t3_client::commands::stop_thread("history-fixture"))
+        .await
+        .unwrap();
+
+    let invalid = transfer
+        .upload(
+            client,
+            Metadata {
+                kind: "image",
+                name: "too-large.png".into(),
+                mime_type: "image/png".into(),
+                size_bytes: attachments::MAX_IMAGE_BYTES + 1,
+            },
+            vec![],
+        )
+        .await;
+    assert!(invalid.is_err());
+    let pending = transfer
+        .upload(
+            client,
+            attachments::metadata("retry.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    let (_, launch) = t3_client::commands::launch_thread(&t3_client::commands::NewThread {
+        project_id: "project-that-does-not-exist",
+        model_selection: &json!({"instanceId":"codex", "model":"gpt-6-astra"}),
+        runtime_mode: "approval-required",
+        text: "",
+        attachments: std::slice::from_ref(&pending.attachment),
+    });
+    assert!(
+        client
+            .call::<_, Value>(t3_client::commands::LAUNCH_THREAD, &launch)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        transfer
+            .download(client, &pending.attachment)
+            .await
+            .unwrap(),
+        bytes,
+        "a rejected launch preserves the upload for retry"
+    );
+    pending.discard().await.unwrap();
+    let path = home.join("empty.txt");
+    std::fs::write(&path, "").unwrap();
+    assert!(attachments::read_file(&path).is_err());
 }
 
 async fn verifies_checkpoint_review(client: &RpcClient, cwd: &std::path::Path) {

@@ -1,4 +1,7 @@
 mod assets;
+mod attachment_draft;
+mod attachment_image;
+mod attachment_view;
 mod changes;
 mod composer;
 mod desktop;
