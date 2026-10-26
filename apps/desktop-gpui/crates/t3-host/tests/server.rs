@@ -64,6 +64,23 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         "{}",
         String::from_utf8_lossy(&seeded.stderr)
     );
+    let planned =
+        tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
+            .current_dir(repo.join("apps/server"))
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("plan-fixture.mjs"),
+            ])
+            .arg(home.join("userdata/statev2.sqlite"))
+            .output()
+            .await
+            .unwrap();
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
     let mut backend = Backend::spawn(BackendLaunch {
         node: std::env::var_os("T3_NODE").map_or_else(|| "node".into(), PathBuf::from),
         entry: repo.join("apps/server/src/bin.ts"),
@@ -97,6 +114,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_review(&client, &review_workspace).await;
     verifies_checkpoint_review(&client, &checkpoint_workspace).await;
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
+    verifies_planning(&client).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -262,6 +280,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         project_id: "project-that-does-not-exist",
         model_selection: &json!({ "instanceId": "codex", "model": "gpt-6-astra" }),
         runtime_mode: "full-access",
+        interaction_mode: "default",
         text: "hello",
         attachments: &[],
     });
@@ -283,6 +302,62 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_planning(client: &RpcClient) {
+    use t3_client::{commands, planning};
+    let projection: t3_client::thread::ThreadProjection = client
+        .call(
+            "orchestration.getThreadProjection",
+            &json!({"threadId":"planning-fixture"}),
+        )
+        .await
+        .unwrap();
+    let plan = planning::active_plan(&projection).unwrap();
+    assert_eq!(plan.id, "planning-plan");
+    assert_eq!(projection.settings().unwrap().interaction_mode, "plan");
+    for (feedback, expected_mode) in [("  Add a focused test.  ", "plan"), ("", "default")] {
+        let calls = commands::plan_follow_up("planning-fixture", &plan, feedback, None, None);
+        let mut message = calls.last().unwrap().clone();
+        message["dispatchMode"] = json!({"type":"defer_start"});
+        for command in &calls[..calls.len() - 1] {
+            commands::dispatch(client, command).await.unwrap();
+        }
+        // A prepared run commits the message and plan reference without starting a provider.
+        commands::dispatch(client, &message).await.unwrap();
+        let projection: Value = client
+            .call(
+                "orchestration.getThreadProjection",
+                &json!({"threadId":"planning-fixture"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(projection["thread"]["interactionMode"], expected_mode);
+        let run = projection["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .max_by_key(|run| run["ordinal"].as_u64())
+            .unwrap();
+        if feedback.is_empty() {
+            assert_eq!(
+                run["sourcePlanRef"],
+                json!({"threadId":"planning-fixture", "planId":"planning-plan"})
+            );
+            assert!(
+                message["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("PLEASE IMPLEMENT THIS PLAN:\n# Native planning")
+            );
+        } else {
+            assert!(run["sourcePlanRef"].is_null());
+            assert_eq!(message["text"], "Add a focused test.");
+        }
+        commands::dispatch(client, &commands::stop_thread("planning-fixture"))
+            .await
+            .unwrap();
+    }
 }
 
 async fn verifies_attachments(
@@ -419,6 +494,7 @@ async fn verifies_attachments(
         project_id: "project-that-does-not-exist",
         model_selection: &json!({"instanceId":"codex", "model":"gpt-6-astra"}),
         runtime_mode: "approval-required",
+        interaction_mode: "plan",
         text: "",
         attachments: std::slice::from_ref(&pending.attachment),
     });

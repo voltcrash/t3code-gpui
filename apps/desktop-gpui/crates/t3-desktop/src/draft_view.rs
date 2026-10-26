@@ -65,6 +65,11 @@ impl DraftView {
         &self.project_id
     }
 
+    pub fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.composer
+            .update(cx, |composer, cx| composer.toggle_plan_mode(window, cx))
+    }
+
     fn set_project(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if project_id != self.project_id {
             self.project_id = project_id;

@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config;
 pub mod find;
 pub mod history;
+pub mod planning;
 pub mod projects;
 pub mod providers;
 pub mod requests;

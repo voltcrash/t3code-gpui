@@ -102,6 +102,7 @@ pub struct Provider {
     #[serde(default)]
     pub models: Vec<ProviderModel>,
     pub supported_runtime_modes: Option<Vec<String>>,
+    pub show_interaction_mode_toggle: Option<bool>,
     #[serde(default)]
     pub requires_new_thread_for_model_change: bool,
 }

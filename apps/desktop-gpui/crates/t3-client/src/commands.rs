@@ -64,17 +64,51 @@ pub fn set_runtime_mode(thread_id: &str, runtime_mode: &str) -> Value {
     })
 }
 
+pub fn set_interaction_mode(thread_id: &str, mode: &str) -> Value {
+    json!({"type":"thread.interaction-mode.set", "commandId":new_id(), "threadId":thread_id, "interactionMode":mode})
+}
+
+/// An empty follow-up implements the proposed plan; written feedback refines it.
+pub fn plan_follow_up(
+    thread_id: &str,
+    plan: &crate::planning::ProposedPlan,
+    feedback: &str,
+    model_selection: Option<&Value>,
+    runtime_mode: Option<&str>,
+) -> Vec<Value> {
+    let implement = feedback.trim().is_empty();
+    let text = if implement {
+        crate::planning::implementation_prompt(plan)
+    } else {
+        feedback.trim().to_owned()
+    };
+    let mut calls = send_turn(
+        thread_id,
+        &text,
+        model_selection,
+        runtime_mode,
+        Some(if implement { "default" } else { "plan" }),
+        &[],
+    );
+    if implement && let Some(command) = calls.last_mut() {
+        command["sourcePlanRef"] = json!({"threadId":thread_id, "planId":plan.id});
+    }
+    calls
+}
+
 /// Persist the pending mode before dispatching the message that uses it.
 pub fn send_turn(
     thread_id: &str,
     text: &str,
     model_selection: Option<&Value>,
     runtime_mode: Option<&str>,
+    interaction_mode: Option<&str>,
     attachments: &[crate::attachments::Attachment],
 ) -> Vec<Value> {
     runtime_mode
         .map(|mode| set_runtime_mode(thread_id, mode))
         .into_iter()
+        .chain(interaction_mode.map(|mode| set_interaction_mode(thread_id, mode)))
         .chain([send_message(thread_id, text, model_selection, attachments)])
         .collect()
 }
@@ -154,6 +188,7 @@ pub struct NewThread<'a> {
     pub project_id: &'a str,
     pub model_selection: &'a Value,
     pub runtime_mode: &'a str,
+    pub interaction_mode: &'a str,
     pub text: &'a str,
     pub attachments: &'a [crate::attachments::Attachment],
 }
@@ -171,7 +206,7 @@ pub fn launch_thread(thread: &NewThread<'_>) -> (String, Value) {
         "generateTitle": true,
         "modelSelection": thread.model_selection,
         "runtimeMode": thread.runtime_mode,
-        "interactionMode": "default",
+        "interactionMode": thread.interaction_mode,
         "workspaceStrategy": { "type": "root" },
         "initialMessage": {
             "messageId": new_id(),
@@ -213,14 +248,17 @@ mod tests {
             "hello",
             Some(&model),
             Some("approval-required"),
+            Some("plan"),
             &[],
         );
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 3);
         assert_eq!(commands[0]["type"], "thread.runtime-mode.set");
         assert_eq!(commands[0]["runtimeMode"], "approval-required");
-        assert_eq!(commands[1]["type"], "message.dispatch");
-        assert_eq!(commands[1]["modelSelection"], model);
-        let unchanged = send_turn("thread-1", "hello", None, None, &[]);
+        assert_eq!(commands[1]["type"], "thread.interaction-mode.set");
+        assert_eq!(commands[1]["interactionMode"], "plan");
+        assert_eq!(commands[2]["type"], "message.dispatch");
+        assert_eq!(commands[2]["modelSelection"], model);
+        let unchanged = send_turn("thread-1", "hello", None, None, None, &[]);
         assert_eq!(unchanged.len(), 1);
         assert!(unchanged[0].get("modelSelection").is_none());
     }

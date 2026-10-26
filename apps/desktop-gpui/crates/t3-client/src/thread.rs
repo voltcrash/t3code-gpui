@@ -21,6 +21,10 @@ pub const SUBSCRIBE: &str = "orchestration.subscribeThread";
 pub struct Run {
     pub id: String,
     pub status: String,
+    pub ordinal: Option<u64>,
+    pub requested_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -57,6 +61,8 @@ pub struct Plan {
     pub id: String,
     pub kind: String,
     pub status: Option<String>,
+    pub run_id: Option<String>,
+    pub markdown: Option<String>,
 }
 
 /// A turn item. The fields every type shares are typed; the rest stay as
@@ -139,6 +145,7 @@ pub struct ProviderSession {
 pub struct ThreadSettings {
     pub model_selection: Value,
     pub runtime_mode: String,
+    pub interaction_mode: String,
     pub started: bool,
     pub has_runtime: bool,
     pub provider_driver: Option<String>,
@@ -161,6 +168,10 @@ impl ThreadProjection {
         Some(ThreadSettings {
             model_selection,
             runtime_mode: self.thread["runtimeMode"].as_str()?.to_owned(),
+            interaction_mode: self.thread["interactionMode"]
+                .as_str()
+                .unwrap_or("default")
+                .to_owned(),
             started: has_runtime || !self.visible_turn_items.is_empty(),
             has_runtime,
             // A removed instance still has a session; keep its driver lock.
