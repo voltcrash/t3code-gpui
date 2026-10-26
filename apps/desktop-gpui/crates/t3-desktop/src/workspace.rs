@@ -26,7 +26,10 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 const SIDEBAR_WIDTH: Pixels = px(280.);
 const CONTEXT: &str = "Workspace";
 
-actions!(workspace, [NewThread, FindInThread, ToggleChanges]);
+actions!(
+    workspace,
+    [NewThread, FindInThread, ToggleChanges, TogglePlanMode]
+);
 
 /// `chat.new` in `packages/shared/src/keybindings.ts`.
 pub fn bind_keys(cx: &mut App) {
@@ -35,6 +38,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
         KeyBinding::new("secondary-d", ToggleChanges, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-a", TogglePlanMode, Some(CONTEXT)),
+        KeyBinding::new(
+            "shift-tab",
+            TogglePlanMode,
+            Some("NativePlanComposer > Input"),
+        ),
     ]);
 }
 
@@ -59,6 +68,27 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        let toggled = if let Some((draft, _)) = &self.draft {
+            draft.update(cx, |draft, cx| draft.toggle_plan_mode(window, cx))
+        } else if let Some(thread) = &self.thread {
+            thread.update(cx, |thread, cx| thread.toggle_plan_mode(window, cx))
+        } else {
+            false
+        };
+        if toggled && window.viewport_size().width < px(1150.) {
+            self.changes = None;
+            self.changes_return_focus = None;
+            cx.notify();
+        }
+    }
+
     fn close_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.changes = None;
         if let Some(focus) = self.changes_return_focus.take() {
@@ -644,6 +674,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
             .on_action(
                 cx.listener(|this, _: &FindInThread, window, cx| this.find_in_thread(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &TogglePlanMode, window, cx| {
+                    this.toggle_plan_mode(window, cx)
+                }),
             )
             .on_action(
                 cx.listener(|this, _: &ToggleChanges, window, cx| this.toggle_changes(window, cx)),

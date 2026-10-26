@@ -186,6 +186,46 @@ impl Render for Settings {
                                     .child(confirmation_row(&self.model, true, cx))
                                     .child(confirmation_row(&self.model, false, cx)),
                             )
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(div().text_lg().font_semibold().child("Agents"))
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap_4()
+                                            .py_3()
+                                            .child(
+                                                v_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .gap_1()
+                                                    .child(div().text_sm().font_medium().child("Plan mode"))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child("Enable Plan/Build controls for supported providers."),
+                                                    ),
+                                            )
+                                            .child(
+                                                Switch::new("plan-mode-enabled")
+                                                    .accessibility_label("Enable Plan mode")
+                                                    .checked(state.value.plan_mode_enabled)
+                                                    .disabled(disabled)
+                                                    .on_change({
+                                                        let model = model.clone();
+                                                        move |enabled, window, cx| {
+                                                            model.update(cx, |state, cx| {
+                                                                let mut value = state.value.clone();
+                                                                value.plan_mode_enabled = *enabled;
+                                                                state.change(value, window, cx);
+                                                            })
+                                                        }
+                                                    }),
+                                            ),
+                                    ),
+                            )
                             .when(saving, |column| {
                                 column.child(
                                     div()
