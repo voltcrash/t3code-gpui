@@ -58,6 +58,7 @@ pub struct ThreadView {
     active_find: Option<ActiveFind>,
     find_return_focus: Option<FocusHandle>,
     find_reveal: bool,
+    checkpoints: Rc<[t3_client::checkpoint::Turn]>,
     _find_events: Subscription,
     _env: Subscription,
 }
@@ -133,6 +134,7 @@ impl ThreadView {
             active_find: None,
             find_return_focus: None,
             find_reveal: false,
+            checkpoints: Rc::from([]),
             _find_events: find_events,
             _env: observe,
         };
@@ -153,6 +155,10 @@ impl ThreadView {
 
     pub fn thread_id(&self) -> &SharedString {
         &self.thread_id
+    }
+
+    pub fn checkpoints(&self) -> Rc<[t3_client::checkpoint::Turn]> {
+        self.checkpoints.clone()
     }
 
     pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -265,6 +271,9 @@ impl ThreadView {
 
     fn apply(&mut self, item: ThreadStreamItem, cx: &mut Context<Self>) {
         let snapshot = matches!(item, ThreadStreamItem::Snapshot { .. });
+        let checkpoints_changed = snapshot
+            || matches!(&item,
+            ThreadStreamItem::Event { event, .. } if event.kind == "checkpoint.captured");
         if snapshot {
             self.history_task = None;
             self.history_error = None;
@@ -276,6 +285,9 @@ impl ThreadView {
         self.retry = RESUBSCRIBE_INITIAL;
         if let Some(projection) = &self.state.projection {
             self.pending = requests::pending_requests(projection);
+            if checkpoints_changed {
+                self.checkpoints = t3_client::checkpoint::turns(&projection.checkpoints).into();
+            }
         }
         self.rebuild_rows(cx);
         self.reveal_find(cx);

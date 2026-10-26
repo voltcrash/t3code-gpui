@@ -5,6 +5,7 @@
 pub mod archives;
 pub mod auth;
 pub mod bootstrap_token;
+pub mod checkpoint;
 pub mod commands;
 pub mod config;
 pub mod find;
