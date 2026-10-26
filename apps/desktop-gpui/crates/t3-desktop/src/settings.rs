@@ -112,7 +112,7 @@ impl Render for Settings {
             }))
             .child(
                 h_flex()
-                    .h_12()
+                    .h(crate::appearance::TOPBAR_HEIGHT)
                     .flex_none()
                     .px_4()
                     .gap_2()

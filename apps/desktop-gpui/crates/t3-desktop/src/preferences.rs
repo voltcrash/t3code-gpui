@@ -48,6 +48,7 @@ pub fn apply_appearance(appearance: Appearance, window: Option<&mut Window>, cx:
         Appearance::Light => Theme::change(ThemeMode::Light, window, cx),
         Appearance::Dark => Theme::change(ThemeMode::Dark, window, cx),
     }
+    crate::appearance::apply(cx);
 }
 
 impl Model {

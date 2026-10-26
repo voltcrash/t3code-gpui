@@ -26,6 +26,7 @@ use t3_client::requests::{
 };
 use t3_client::thread::ThreadSettings;
 
+use crate::appearance::CONTENT_WIDTH;
 use crate::attachment_draft::AttachmentDraft;
 use crate::environment::LocalEnvironment;
 use crate::thread_view::ThreadView;
@@ -42,7 +43,6 @@ const ANSWER_PLACEHOLDER: &str =
     "Type your own answer, or leave this blank to use the selected option";
 const PROVIDER_GONE: &str = "Provider process is gone. Interrupt or restart the run to respond.";
 const NO_PROVIDER_PLACEHOLDER: &str = "Enable a provider in Settings to send a message";
-const MAX_WIDTH: Pixels = px(768.);
 
 /// The question whose answer the text box currently holds.
 #[derive(Clone, PartialEq)]
@@ -1238,7 +1238,12 @@ impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (danger, warning, border, background) = {
             let theme = cx.theme();
-            (theme.danger, theme.warning, theme.border, theme.background)
+            (
+                theme.danger,
+                theme.warning,
+                theme.border,
+                crate::appearance::palette(cx).color("surfaceRaised"),
+            )
         };
         let text = self.input.read(cx).value();
         let message_mode = matches!(self.mode(), Mode::Message);
@@ -1329,7 +1334,7 @@ impl Render for Composer {
         };
         let action = action
             .primary()
-            .rounded(ButtonRounded::Large)
+            .rounded(ButtonRounded::Size(px(999.)))
             .loading(self.busy);
         let action = if action_is_stop(&self.mode(), self.is_running(cx), has_text) {
             action
@@ -1356,7 +1361,7 @@ impl Render for Composer {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(MAX_WIDTH)
+                    .max_w(CONTENT_WIDTH)
                     .gap_1()
                     .when_some(self.error.clone(), |column, error| {
                         column.child(div().px_1().text_xs().text_color(danger).child(error))
@@ -1366,7 +1371,7 @@ impl Render for Composer {
                             .w_full()
                             .p_2()
                             .gap_1()
-                            .rounded_xl()
+                            .rounded_3xl()
                             .border_1()
                             .border_color(if panel.is_some() {
                                 warning.opacity(0.5)
