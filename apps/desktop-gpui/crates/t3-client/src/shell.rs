@@ -43,6 +43,19 @@ pub struct BackgroundTask {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PullRequestSnapshot {
+    pub title: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub repository: String,
+    pub url: String,
+    pub source: Option<String>,
+    pub snapshot: Option<PullRequestSnapshot>,
+}
+
 /// A subset of `OrchestrationV2ThreadShell`; unknown fields are ignored so
 /// newer servers stay readable.
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +66,10 @@ pub struct ThreadShell {
     pub title: String,
     #[serde(default)]
     pub lineage: Lineage,
+    #[serde(default)]
+    pub pull_requests: Vec<PullRequest>,
+    pub linked_pull_request: Option<PullRequest>,
+    pub branch_pull_request: Option<PullRequest>,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub status: String,

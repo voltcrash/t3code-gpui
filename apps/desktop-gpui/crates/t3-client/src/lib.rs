@@ -20,5 +20,6 @@ pub mod rpc;
 pub mod shell;
 pub mod thread;
 pub mod thread_actions;
+pub mod thread_search;
 
 pub use rpc::{RpcClient, RpcError, Subscription};
