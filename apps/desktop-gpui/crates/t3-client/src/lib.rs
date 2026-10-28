@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod auth;
 pub mod bootstrap_token;
 pub mod checkpoint;
+pub mod command_output;
 pub mod commands;
 pub mod config;
 pub mod find;
