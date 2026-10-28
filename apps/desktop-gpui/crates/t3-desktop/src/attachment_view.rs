@@ -9,9 +9,53 @@ use gpui_kit::*;
 use std::sync::Arc;
 use t3_client::attachments::Attachment;
 
+#[derive(Clone)]
+enum Asset {
+    Attachment(Attachment),
+    ToolImage(t3_client::tool_images::Image),
+}
+impl Asset {
+    fn name(&self) -> String {
+        match self {
+            Self::Attachment(item) => item.name.clone(),
+            Self::ToolImage(image) => image.name(),
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            Self::Attachment(item) => {
+                format!("{} · {} KiB", item.name, item.size_bytes.div_ceil(1024))
+            }
+            Self::ToolImage(image) => image.name(),
+        }
+    }
+    fn preview(&self) -> bool {
+        match self {
+            Self::Attachment(item) => {
+                item.kind == "image"
+                    && matches!(
+                        item.mime_type.as_str(),
+                        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                    )
+            }
+            Self::ToolImage(_) => true,
+        }
+    }
+    async fn download(
+        &self,
+        client: &t3_client::attachments::Client,
+        rpc: &t3_client::RpcClient,
+    ) -> Result<Vec<u8>, t3_client::attachments::Error> {
+        match self {
+            Self::Attachment(item) => client.download(rpc, item).await,
+            Self::ToolImage(image) => client.download_tool_image(rpc, image).await,
+        }
+    }
+}
+
 pub struct AttachmentView {
     env: Entity<LocalEnvironment>,
-    attachment: Attachment,
+    asset: Asset,
     image: Option<Arc<RenderImage>>,
     task: Option<Task<()>>,
     error: Option<SharedString>,
@@ -24,10 +68,20 @@ impl AttachmentView {
         attachment: Attachment,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::build(env, Asset::Attachment(attachment), cx)
+    }
+    pub fn tool_image(
+        env: Entity<LocalEnvironment>,
+        image: t3_client::tool_images::Image,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(env, Asset::ToolImage(image), cx)
+    }
+    fn build(env: Entity<LocalEnvironment>, asset: Asset, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&env, |_, _, cx| cx.notify());
         Self {
             env,
-            attachment,
+            asset,
             image: None,
             task: None,
             error: None,
@@ -40,10 +94,10 @@ impl AttachmentView {
         let (Some(client), Some(rpc)) = (env.attachments.clone(), env.rpc.clone()) else {
             return;
         };
-        let attachment = self.attachment.clone();
+        let asset = self.asset.clone();
         let reading = tokio_bridge::spawn(cx, async move {
-            let bytes = client
-                .download(&rpc, &attachment)
+            let bytes = asset
+                .download(&client, &rpc)
                 .await
                 .map_err(|error| error.to_string())?;
             tokio::task::spawn_blocking(move || crate::attachment_image::thumbnail(&bytes))
@@ -74,7 +128,7 @@ impl AttachmentView {
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        let prompt = cx.prompt_for_new_path(&dir, Some(&self.attachment.name));
+        let prompt = cx.prompt_for_new_path(&dir, Some(&self.asset.name()));
         self.error = None;
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = prompt.await;
@@ -89,10 +143,10 @@ impl AttachmentView {
                             cx.notify();
                             return;
                         };
-                        let attachment = this.attachment.clone();
+                        let asset = this.asset.clone();
                         let saving = tokio_bridge::spawn(cx, async move {
-                            let bytes = client
-                                .download(&rpc, &attachment)
+                            let bytes = asset
+                                .download(&client, &rpc)
                                 .await
                                 .map_err(|error| error.to_string())?;
                             tokio::task::spawn_blocking(move || std::fs::write(path, bytes))
@@ -125,11 +179,7 @@ impl AttachmentView {
 }
 impl Render for AttachmentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let preview = self.attachment.kind == "image"
-            && matches!(
-                self.attachment.mime_type.as_str(),
-                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-            );
+        let preview = self.asset.preview();
         if preview && self.image.is_none() && self.task.is_none() && self.error.is_none() {
             self.load(window, cx);
         }
@@ -167,11 +217,14 @@ impl Render for AttachmentView {
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    .child(div().flex_1().min_w_0().truncate().text_xs().child(format!(
-                        "{} · {} KiB",
-                        self.attachment.name,
-                        self.attachment.size_bytes.div_ceil(1024)
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .child(self.asset.label()),
+                    )
                     .when(self.saved, |row| row.child(div().text_xs().child("Saved")))
                     .child(
                         Button::new("save-attachment")
