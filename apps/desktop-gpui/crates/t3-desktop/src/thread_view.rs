@@ -70,6 +70,8 @@ pub struct ThreadView {
     find_reveal: bool,
     checkpoints: Rc<[t3_client::checkpoint::Turn]>,
     proposed_plan: Option<Rc<t3_client::planning::ProposedPlan>>,
+    tasks: Option<Rc<t3_client::tasks::Tasks>>,
+    tasks_expanded: bool,
     _find_events: Subscription,
     _env: Subscription,
 }
@@ -126,6 +128,7 @@ impl ThreadView {
         composer.update(cx, |composer, cx| composer.focus(window, cx));
         let observe = cx.observe(&env, |this, _, cx| {
             this.ensure_subscribed(cx);
+            this.refresh_tasks(cx);
             cx.notify();
         });
         let mut view = Self {
@@ -149,6 +152,8 @@ impl ThreadView {
             find_reveal: false,
             checkpoints: Rc::from([]),
             proposed_plan: None,
+            tasks: None,
+            tasks_expanded: false,
             _find_events: find_events,
             _env: observe,
         };
@@ -182,6 +187,29 @@ impl ThreadView {
     pub fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.composer
             .update(cx, |composer, cx| composer.toggle_plan_mode(window, cx))
+    }
+
+    pub fn toggle_tasks(&mut self, cx: &mut Context<Self>) {
+        self.tasks_expanded = !self.tasks_expanded;
+        cx.notify();
+    }
+    fn refresh_tasks(&mut self, cx: &mut Context<Self>) {
+        let next = self.state.projection.as_ref().and_then(|projection| {
+            let env = self.env.read(cx);
+            let shell = env.thread(self.thread_id.as_ref());
+            t3_client::tasks::select(
+                projection,
+                shell.and_then(|thread| thread.active_run_id.as_deref()),
+                shell.and_then(|thread| thread.latest_run_id.as_deref()),
+            )
+        });
+        if self.tasks.as_deref() != next.as_ref() {
+            if self.tasks.as_ref().map(|tasks| &tasks.id) != next.as_ref().map(|tasks| &tasks.id) {
+                self.tasks_expanded = false;
+            }
+            self.tasks = next.map(Rc::new);
+            cx.notify();
+        }
     }
 
     fn refresh_proposed_plan(&mut self) {
@@ -329,6 +357,7 @@ impl ThreadView {
         if plan_changed {
             self.refresh_proposed_plan();
         }
+        self.refresh_tasks(cx);
         self.rebuild_rows(cx);
         self.sync_outputs(cx);
         self.reveal_find(cx);
@@ -914,6 +943,16 @@ impl Render for ThreadView {
             .min_h_0()
             .child(self.find.clone())
             .child(timeline)
+            .when(!archived, |column| {
+                column.when_some(self.tasks.clone(), |column, tasks| {
+                    column.child(crate::task_progress::render(
+                        tasks,
+                        self.tasks_expanded,
+                        cx.weak_entity(),
+                        cx,
+                    ))
+                })
+            })
             .when(!archived, |column| column.child(self.composer.clone()))
             .when(archived, |column| {
                 column.child(
