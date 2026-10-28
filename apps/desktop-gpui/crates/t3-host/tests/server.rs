@@ -1050,8 +1050,32 @@ async fn verifies_tool_detail(client: &RpcClient, http: &reqwest::Client, base: 
     else {
         panic!("expected snapshot");
     };
-    assert_eq!(projection.visible_turn_items.len(), 12);
+    assert_eq!(projection.visible_turn_items.len(), 15);
     for row in &projection.visible_turn_items {
+        if row.item.kind == "notification" {
+            let entry = t3_client::thread::timeline_entries(&projection)
+                .into_iter()
+                .find(|entry| entry.id == row.item.id)
+                .unwrap();
+            let t3_client::thread::TimelineContent::Work { label, detail, .. } = entry.content
+            else {
+                panic!("expected notice");
+            };
+            match row.item.id.as_str() {
+                "notice-detail" => {
+                    assert_eq!(label, "Background task finished");
+                    assert_eq!(
+                        detail.as_deref(),
+                        Some(
+                            "café — background task finished.\nSecond line with <b>literal text</b>.\nKeep the existing Node protocol."
+                        )
+                    );
+                }
+                "notice-empty" | "notice-summary" => assert_eq!(detail, None),
+                _ => panic!("unexpected notification"),
+            }
+            continue;
+        }
         let source = t3_client::tool_detail::source(row).unwrap();
         if source.request.kind == t3_client::tool_detail::Kind::FileChange {
             assert!(!source.omitted, "file metadata is already in the stream");
