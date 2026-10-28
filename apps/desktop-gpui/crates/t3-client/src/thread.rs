@@ -6,7 +6,7 @@
 //! Timeline entries follow `deriveTimelineEntriesFromVisibleTurnItems` and
 //! `projectedWorkEntry` in `apps/web/src/session-logic.ts`. Keep them in step.
 //!
-//! Only the collections conversation and turn review read are kept. Events for the others
+//! Only the collections conversation, composer, and turn review read are kept. Events for the others
 //! still advance the resume sequence.
 
 use std::collections::{HashMap, HashSet};
@@ -25,6 +25,7 @@ pub struct Run {
     pub requested_at: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub provider_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -63,6 +64,8 @@ pub struct Plan {
     pub status: Option<String>,
     pub run_id: Option<String>,
     pub markdown: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<crate::tasks::Step>,
 }
 
 /// A turn item. The fields every type shares are typed; the rest stay as
@@ -130,7 +133,15 @@ pub struct ThreadProjection {
     #[serde(default)]
     pub provider_sessions: Vec<ProviderSession>,
     #[serde(default)]
+    pub provider_threads: Vec<ProviderThread>,
+    #[serde(default)]
     pub checkpoints: Vec<crate::checkpoint::Checkpoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderThread {
+    pub id: String,
+    pub driver: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -446,6 +457,15 @@ fn apply_event(
             };
             upsert(&mut projection.attempts, attempt, |attempt| &attempt.id);
             refresh_visibility(projection);
+            true
+        }
+        "provider-thread.updated" => {
+            let Ok(thread) = serde_json::from_value::<ProviderThread>(event.payload) else {
+                return false;
+            };
+            upsert(&mut projection.provider_threads, thread, |thread| {
+                &thread.id
+            });
             true
         }
         "provider-session.attached" | "provider-session.updated" => {
@@ -1521,6 +1541,51 @@ mod tests {
                 TimelineContent::Work { detail: None, .. }
             ));
         }
+    }
+
+    #[test]
+    fn task_plans_follow_provider_thread_and_plan_updates_and_replaced_snapshots() {
+        let mut state = ThreadState::default();
+        state.apply(snapshot(vec![],json!([{"id":"run","status":"completed","ordinal":1,"providerThreadId":"provider","startedAt":"now"}]),false));
+        state.apply(event(
+            11,
+            "provider-thread.updated",
+            json!({"id":"provider","driver":"claudeAgent"}),
+        ));
+        let mut plan = json!({"id":"tasks","kind":"todo_list","status":"active","runId":"run","steps":[{"id":"one","text":"Inspect","status":"pending"}]});
+        state.apply(event(12, "plan.updated", plan.clone()));
+        assert_eq!(
+            crate::tasks::select(state.projection.as_ref().unwrap(), None, Some("run"))
+                .unwrap()
+                .current(),
+            "Inspect"
+        );
+        plan["steps"][0]["status"] = "completed".into();
+        state.apply(event(13, "plan.updated", plan.clone()));
+        assert!(
+            crate::tasks::select(state.projection.as_ref().unwrap(), None, Some("run")).is_none()
+        );
+        plan["steps"][0]["status"] = "pending".into();
+        state.apply(event(14, "plan.updated", plan));
+        state.apply(event(
+            15,
+            "provider-thread.updated",
+            json!({"id":"provider","driver":"codex"}),
+        ));
+        assert!(
+            crate::tasks::select(state.projection.as_ref().unwrap(), None, Some("run")).is_none()
+        );
+        assert_eq!(state.projection.as_ref().unwrap().provider_threads.len(), 1);
+        state.apply(snapshot(vec![], json!([]), false));
+        assert!(
+            state
+                .projection
+                .as_ref()
+                .unwrap()
+                .provider_threads
+                .is_empty()
+        );
+        assert!(crate::tasks::select(state.projection.as_ref().unwrap(), None, None).is_none());
     }
 
     #[test]

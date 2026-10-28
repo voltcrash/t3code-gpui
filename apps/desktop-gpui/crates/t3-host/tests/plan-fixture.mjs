@@ -116,6 +116,89 @@ await Effect.runPromise(
         },
       });
     }
+    const tasksThread = "tasks-fixture";
+    const tasksRun = "tasks-run";
+    const providerThread = "tasks-provider";
+    const steps = [
+      {
+        id: "inspect",
+        text: "Inspect the existing server protocol",
+        status: "completed",
+        durationMs: 1234,
+      },
+      { id: "implement", text: "Implement native task progress", status: "running" },
+      { id: "verify", text: "Verify narrow layouts and preserve the draft", status: "pending" },
+    ];
+    events.push(
+      {
+        ...events[0],
+        id: "tasks-thread-created",
+        threadId: tasksThread,
+        payload: {
+          ...events[0].payload,
+          id: tasksThread,
+          title: "Task progress fixture",
+          interactionMode: "default",
+          providerInstanceId: "claudeAgent",
+          activeProviderThreadId: providerThread,
+          modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+        },
+      },
+      {
+        id: "tasks-provider-updated",
+        type: "provider-thread.updated",
+        threadId: tasksThread,
+        occurredAt: now,
+        payload: {
+          id: providerThread,
+          driver: "claudeAgent",
+          providerInstanceId: "claudeAgent",
+          providerSessionId: null,
+          appThreadId: tasksThread,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+      {
+        ...events[1],
+        id: "tasks-run-updated",
+        threadId: tasksThread,
+        runId: tasksRun,
+        payload: {
+          ...events[1].payload,
+          id: tasksRun,
+          threadId: tasksThread,
+          providerInstanceId: "claudeAgent",
+          providerThreadId: providerThread,
+          modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+          userMessageId: "tasks-user",
+        },
+      },
+      {
+        id: "tasks-plan-updated",
+        type: "plan.updated",
+        threadId: tasksThread,
+        runId: tasksRun,
+        occurredAt: now,
+        payload: {
+          id: "tasks-plan",
+          threadId: tasksThread,
+          runId: tasksRun,
+          nodeId: "tasks-node",
+          kind: "todo_list",
+          status: "active",
+          steps,
+        },
+      },
+    );
     const store = yield* Events.EventStoreV2;
     yield* store.append({ events });
     yield* Effect.forEach(events, projection.apply, { discard: true });

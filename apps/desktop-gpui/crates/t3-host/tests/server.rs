@@ -115,6 +115,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_checkpoint_review(&client, &checkpoint_workspace).await;
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
     verifies_planning(&client).await;
+    verifies_tasks(&client).await;
     verifies_sidebar_search(&client).await;
     verifies_tool_detail(&client, &http, backend.http_base()).await;
 
@@ -1206,4 +1207,21 @@ async fn verifies_tool_detail(client: &RpcClient, http: &reqwest::Client, base: 
         .await
         .unwrap();
     assert!(missing.item.is_none());
+}
+
+async fn verifies_tasks(client: &RpcClient) {
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        "orchestration.subscribeThread",
+        &json!({"threadId":"tasks-fixture"}),
+    );
+    let ThreadStreamItem::Snapshot { projection, .. } = stream.next().await.unwrap().unwrap()
+    else {
+        panic!("expected snapshot");
+    };
+    let tasks = t3_client::tasks::select(&projection, None, Some("tasks-run")).unwrap();
+    assert!(!tasks.live, "unfinished Claude tasks survive a settled run");
+    assert_eq!(tasks.completed(), 1);
+    assert_eq!(tasks.steps.len(), 3);
+    assert_eq!(tasks.current(), "Implement native task progress");
+    assert_eq!(tasks.steps[0].duration_ms, Some(1234));
 }
