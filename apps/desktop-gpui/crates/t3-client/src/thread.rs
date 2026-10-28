@@ -935,7 +935,11 @@ fn entry_content(
                 thinking: item.kind == "reasoning",
                 tool: matches!(
                     item.kind.as_str(),
-                    "command_execution" | "dynamic_tool" | "file_search" | "web_search"
+                    "command_execution"
+                        | "dynamic_tool"
+                        | "file_search"
+                        | "web_search"
+                        | "file_change"
                 ),
             }
         }
