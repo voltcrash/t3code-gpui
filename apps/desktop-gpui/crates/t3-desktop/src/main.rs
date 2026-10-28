@@ -15,6 +15,7 @@ mod preferences;
 mod project_picker;
 mod settings;
 mod sidebar;
+mod task_progress;
 mod thread_actions;
 mod thread_find;
 mod thread_view;
