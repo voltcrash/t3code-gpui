@@ -746,6 +746,7 @@ pub enum TimelineContent {
         role: Role,
         text: String,
         streaming: bool,
+        copyable: bool,
         attachments: Vec<crate::attachments::Attachment>,
     },
     ProposedPlan {
@@ -796,6 +797,7 @@ fn is_workspace_preparation(item: &TurnItem) -> bool {
 }
 
 pub fn timeline_entries(projection: &ThreadProjection) -> Vec<TimelineEntry> {
+    let copyable = copyable_messages(projection);
     let folded_answers: HashSet<String> = projection
         .visible_turn_items
         .iter()
@@ -828,19 +830,72 @@ pub fn timeline_entries(projection: &ThreadProjection) -> Vec<TimelineEntry> {
             Some(TimelineEntry {
                 id: item.id.clone(),
                 created_at: item.created_at().to_owned(),
-                content: entry_content(item, projection),
+                content: entry_content(item, projection, copyable.contains(item.id.as_str())),
             })
         })
         .collect()
 }
 
-fn entry_content(item: &TurnItem, projection: &ThreadProjection) -> TimelineContent {
+// Match the original client's terminal-message rule: one assistant copy action
+// per run, or per user-delimited response when older history has no run IDs.
+fn copyable_messages(projection: &ThreadProjection) -> HashSet<&str> {
+    let mut copyable = HashSet::new();
+    let mut terminal = HashMap::new();
+    let mut response = 0;
+    let active_runs: HashSet<&str> = projection
+        .runs
+        .iter()
+        .filter(|run| {
+            run.completed_at.is_none()
+                || matches!(run.status.as_str(), "running" | "starting" | "waiting")
+        })
+        .map(|run| run.id.as_str())
+        .collect();
+    for row in &projection.visible_turn_items {
+        let item = &row.item;
+        match item.kind.as_str() {
+            "user_message" => {
+                response += 1;
+                if item.str("text").is_some_and(|text| !text.trim().is_empty()) {
+                    copyable.insert(item.id.as_str());
+                }
+            }
+            "assistant_message" => {
+                let key = (
+                    item.run_id.as_deref(),
+                    if item.run_id.is_some() { 0 } else { response },
+                );
+                terminal.insert(key, item);
+            }
+            _ => {}
+        }
+    }
+    for ((run, segment), item) in terminal {
+        let active = run.map_or(!active_runs.is_empty() && segment == response, |run| {
+            active_runs.contains(run)
+        });
+        if !active
+            && item.fields.get("streaming") != Some(&Value::Bool(true))
+            && item.str("text").is_some_and(|text| !text.trim().is_empty())
+        {
+            copyable.insert(item.id.as_str());
+        }
+    }
+    copyable
+}
+
+fn entry_content(
+    item: &TurnItem,
+    projection: &ThreadProjection,
+    copyable: bool,
+) -> TimelineContent {
     let text = || item.str("text").unwrap_or_default().to_owned();
     match item.kind.as_str() {
         "user_message" => TimelineContent::Message {
             role: Role::User,
             text: text(),
             streaming: false,
+            copyable,
             attachments: item
                 .fields
                 .get("attachments")
@@ -851,6 +906,7 @@ fn entry_content(item: &TurnItem, projection: &ThreadProjection) -> TimelineCont
             role: Role::Assistant,
             text: text(),
             streaming: item.fields.get("streaming") == Some(&Value::Bool(true)),
+            copyable,
             attachments: Vec::new(),
         },
         "proposed_plan" => {
@@ -1190,9 +1246,89 @@ mod tests {
                 role: Role::Assistant,
                 text: "Hello".into(),
                 streaming: true,
+                copyable: false,
                 attachments: Vec::new(),
             }
         );
+    }
+
+    fn copied_ids(state: &ThreadState) -> Vec<String> {
+        state
+            .timeline()
+            .into_iter()
+            .filter(|row| matches!(row.content, TimelineContent::Message { copyable: true, .. }))
+            .map(|row| row.id)
+            .collect()
+    }
+
+    #[test]
+    fn copy_actions_keep_markdown_and_only_expose_the_terminal_response() {
+        let mut state = ThreadState::default();
+        let mut final_message = item("final", "assistant_message", 4, Some("r"));
+        final_message["text"] = "**Answer**\n\n```rust\nlet x = 1;\n```".into();
+        state.apply(snapshot(
+            vec![
+                item("user", "user_message", 1, None),
+                item("commentary", "assistant_message", 2, Some("r")),
+                item("tool", "command_execution", 3, Some("r")),
+                final_message.clone(),
+            ],
+            json!([{ "id":"r", "status":"completed", "completedAt":"2026-10-24T10:00:00Z" }]),
+            false,
+        ));
+        assert_eq!(copied_ids(&state), ["user", "final"]);
+        assert!(
+            matches!(&state.timeline()[3].content, TimelineContent::Message { text, .. } if text == final_message["text"].as_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn copy_actions_wait_for_run_completion_and_streaming_to_finish() {
+        let mut state = ThreadState::default();
+        let mut answer = item("answer", "assistant_message", 2, Some("r"));
+        answer["streaming"] = true.into();
+        state.apply(snapshot(
+            vec![item("user", "user_message", 1, None), answer.clone()],
+            json!([{ "id":"r", "status":"running" }]),
+            false,
+        ));
+        assert_eq!(copied_ids(&state), ["user"]);
+        answer["streaming"] = false.into();
+        state.apply(event(11, "turn-item.updated", answer));
+        assert_eq!(copied_ids(&state), ["user"]);
+        state.apply(event(
+            12,
+            "run.updated",
+            json!({ "id":"r", "status":"completed", "completedAt":"2026-10-24T10:00:00Z" }),
+        ));
+        assert_eq!(copied_ids(&state), ["user", "answer"]);
+        let mut newer = item("newer", "assistant_message", 3, Some("r"));
+        newer["streaming"] = true.into();
+        state.apply(event(13, "turn-item.updated", newer.clone()));
+        assert_eq!(copied_ids(&state), ["user"]);
+        newer["streaming"] = false.into();
+        state.apply(event(14, "turn-item.updated", newer));
+        assert_eq!(copied_ids(&state), ["user", "newer"]);
+    }
+
+    #[test]
+    fn runless_copy_actions_follow_user_boundaries_and_ignore_empty_messages() {
+        let mut state = ThreadState::default();
+        let mut empty = item("empty", "user_message", 6, None);
+        empty["text"] = "  \n".into();
+        state.apply(snapshot(
+            vec![
+                item("u1", "user_message", 1, None),
+                item("a1", "assistant_message", 2, None),
+                item("u2", "user_message", 3, None),
+                item("commentary", "assistant_message", 4, None),
+                item("a2", "assistant_message", 5, None),
+                empty,
+            ],
+            json!([]),
+            true,
+        ));
+        assert_eq!(copied_ids(&state), ["u1", "a1", "u2", "a2"]);
     }
 
     #[test]
