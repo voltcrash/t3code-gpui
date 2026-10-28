@@ -313,6 +313,33 @@ await Effect.runPromise(
         },
       });
     }
+    for (const [id, summary, detail] of [
+      [
+        "notice-detail",
+        "Background task finished",
+        "café — background task finished.\nSecond line with <b>literal text</b>.\nKeep the existing Node protocol.",
+      ],
+      ["notice-empty", "Empty-detail notification", " \n"],
+      ["notice-summary", "Summary-only notification", undefined],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...searchBase,
+          id,
+          type: "notification",
+          ordinal: events.length,
+          status: "completed",
+          source: { kind: "background_task" },
+          outcome: "completed",
+          summary,
+          ...(detail === undefined ? {} : { detail }),
+        },
+      });
+    }
     const store = yield* Events.EventStoreV2;
     const projection = yield* Projections.ProjectionStoreV2;
     yield* store.append({ events });

@@ -975,7 +975,10 @@ fn work_label(item: &TurnItem) -> (String, Option<String>) {
     };
     let or = |fallback: &str| title.clone().unwrap_or_else(|| fallback.to_owned());
     match item.kind.as_str() {
-        "notification" => (field("summary").unwrap_or_default(), None),
+        "notification" => (
+            field("summary").unwrap_or_default(),
+            field("detail").filter(|detail| !detail.trim().is_empty()),
+        ),
         "thread_created" => ("Created thread".into(), None),
         "compaction" => (compaction_label(&item.status).into(), field("summary")),
         "reasoning" => (or("Thinking"), field("text")),
@@ -1493,6 +1496,31 @@ mod tests {
                 tool: true,
             }
         );
+    }
+
+    #[test]
+    fn notification_details_preserve_live_text_and_keep_empty_rows_compact() {
+        let mut state = ThreadState::default();
+        let mut notice = item("notice", "notification", 1, None);
+        notice["summary"] = "Background task finished".into();
+        notice["detail"] = "  café\nSecond line with <b>literal text</b>.\n".into();
+        state.apply(snapshot(vec![notice.clone()], json!([]), false));
+        assert!(
+            matches!(&state.timeline()[0].content, TimelineContent::Work { label, detail: Some(detail), .. } if label == "Background task finished" && detail == "  café\nSecond line with <b>literal text</b>.\n")
+        );
+        notice["detail"] = "Updated details.\nNext line.".into();
+        state.apply(event(11, "turn-item.updated", notice.clone()));
+        assert!(
+            matches!(&state.timeline()[0].content, TimelineContent::Work { detail: Some(detail), .. } if detail == "Updated details.\nNext line.")
+        );
+        for (sequence, detail) in [(12, json!("")), (13, json!(" \n")), (14, Value::Null)] {
+            notice["detail"] = detail;
+            state.apply(event(sequence, "turn-item.updated", notice.clone()));
+            assert!(matches!(
+                &state.timeline()[0].content,
+                TimelineContent::Work { detail: None, .. }
+            ));
+        }
     }
 
     #[test]
