@@ -1,6 +1,6 @@
 //! The open thread's conversation, live from `orchestration.subscribeThread`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use t3_client::thread::{
 
 use crate::appearance::CONTENT_WIDTH;
 use crate::attachment_view::AttachmentView;
+use crate::command_output::CommandOutput;
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
 use crate::thread_find::{FindEvent, FindText, ThreadFind};
@@ -54,6 +55,7 @@ pub struct ThreadView {
     state: ThreadState,
     rows: Rc<[Row]>,
     expanded_work: Rc<HashSet<String>>,
+    outputs: HashMap<String, (Entity<CommandOutput>, Subscription)>,
     pending: PendingRequests,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<Composer>,
@@ -132,6 +134,7 @@ impl ThreadView {
             state: ThreadState::default(),
             rows: Rc::from([]),
             expanded_work: Rc::default(),
+            outputs: HashMap::new(),
             pending: PendingRequests::default(),
             scroller,
             composer,
@@ -308,6 +311,7 @@ impl ThreadView {
             || matches!(&item,
             ThreadStreamItem::Event { event, .. } if event.kind == "checkpoint.captured");
         if snapshot {
+            self.outputs.clear();
             self.history_task = None;
             self.history_error = None;
         }
@@ -326,6 +330,7 @@ impl ThreadView {
             self.refresh_proposed_plan();
         }
         self.rebuild_rows(cx);
+        self.sync_outputs(cx);
         self.reveal_find(cx);
         self.find.update(cx, |find, cx| find.refresh(cx));
         if snapshot {
@@ -392,21 +397,56 @@ impl ThreadView {
     }
 
     fn toggle_work(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(index) = self
-            .rows
-            .iter()
-            .position(|row| row.entry.id == id && row.detail.is_some())
-        else {
+        let Some(index) = self.rows.iter().position(|row| {
+            row.entry.id == id
+                && (row.detail.is_some()
+                    || matches!(
+                        row.entry.content,
+                        TimelineContent::Work { command: true, .. }
+                    ))
+        }) else {
             return;
         };
         let expanded = Rc::make_mut(&mut self.expanded_work);
         if !expanded.remove(id) {
             expanded.insert(id.to_owned());
         }
+        self.sync_outputs(cx);
         self.scroller.update(cx, |scroller, cx| {
             scroller.remeasure_items(index + 1..index + 2, cx);
         });
         cx.notify();
+    }
+
+    fn sync_outputs(&mut self, cx: &mut Context<Self>) {
+        let sources: HashMap<_, _> = self
+            .state
+            .projection
+            .iter()
+            .flat_map(|projection| &projection.visible_turn_items)
+            .filter(|row| self.expanded_work.contains(&row.item.id))
+            .filter_map(|row| {
+                t3_client::command_output::source(row).map(|source| (row.item.id.clone(), source))
+            })
+            .collect();
+        self.outputs.retain(|id, _| sources.contains_key(id));
+        for (id, source) in sources {
+            if let Some((view, _)) = self.outputs.get(&id) {
+                view.update(cx, |view, cx| view.set_source(source, cx));
+            } else {
+                let view = cx.new(|cx| CommandOutput::new(self.env.clone(), source, cx));
+                let item_id = id.clone();
+                let observer = cx.observe(&view, move |this, _, cx| {
+                    if let Some(index) = this.rows.iter().position(|row| row.entry.id == item_id) {
+                        this.scroller.update(cx, |scroller, cx| {
+                            scroller.remeasure_items(index + 1..index + 2, cx);
+                        });
+                    }
+                    cx.notify();
+                });
+                self.outputs.insert(id, (view, observer));
+            }
+        }
     }
 
     /// Rebuilds the rows and remeasures only from the first one that changed,
@@ -423,7 +463,7 @@ impl ThreadView {
             return;
         }
         if !self.expanded_work.is_empty() {
-            let expandable: HashSet<&str> = entries.iter().filter(|entry| matches!(&entry.content, TimelineContent::Work { detail: Some(detail), .. } if !detail.trim().is_empty())).map(|entry| entry.id.as_str()).collect();
+            let expandable: HashSet<&str> = entries.iter().filter(|entry| matches!(&entry.content, TimelineContent::Work { detail: Some(detail), .. } if !detail.trim().is_empty()) || matches!(entry.content, TimelineContent::Work { command: true, .. })).map(|entry| entry.id.as_str()).collect();
             Rc::make_mut(&mut self.expanded_work).retain(|id| expandable.contains(id.as_str()));
         }
         let old_len = self.rows.len();
@@ -529,6 +569,7 @@ fn render_row(
     active_find: Option<&ActiveFind>,
     expanded: bool,
     owner: WeakEntity<ThreadView>,
+    output: Option<Entity<CommandOutput>>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -618,7 +659,10 @@ fn render_row(
             )
             .into_any_element(),
         TimelineContent::Work {
-            status, thinking, ..
+            status,
+            thinking,
+            command,
+            ..
         } => {
             let color = match status {
                 WorkStatus::InProgress => theme.foreground,
@@ -632,7 +676,7 @@ fn render_row(
                 .gap_2()
                 .text_xs()
                 .text_color(color)
-                .child(if detail.is_some() {
+                .child(if detail.is_some() || *command {
                     let entry_id = row.entry.id.clone();
                     Button::new((ElementId::from(id.clone()), "toggle-details"))
                         .ghost()
@@ -679,33 +723,39 @@ fn render_row(
                 .min_w_0()
                 .gap_2()
                 .child(header)
-                .when_some(detail.filter(|_| expanded), |column, detail| {
-                    column.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .pl_4()
-                            .text_sm()
-                            .when(!thinking, |body| {
-                                body.font_family(theme.mono_font_family.clone())
-                            })
-                            .child(if *thinking {
-                                TextView::markdown(
-                                    (ElementId::from(id.clone()), "work-detail"),
-                                    detail,
-                                )
-                                .selectable(true)
-                                .into_any_element()
-                            } else {
+                .when(expanded, |column| {
+                    column
+                        .when_some(detail, |column, detail| {
+                            column.child(
                                 div()
-                                    .whitespace_normal()
-                                    .child(SelectableText::new(
-                                        (ElementId::from(id.clone()), "work-detail"),
-                                        detail,
-                                    ))
-                                    .into_any_element()
-                            }),
-                    )
+                                    .w_full()
+                                    .min_w_0()
+                                    .pl_4()
+                                    .text_sm()
+                                    .when(!thinking, |body| {
+                                        body.font_family(theme.mono_font_family.clone())
+                                    })
+                                    .child(if *thinking {
+                                        TextView::markdown(
+                                            (ElementId::from(id.clone()), "work-detail"),
+                                            detail,
+                                        )
+                                        .selectable(true)
+                                        .into_any_element()
+                                    } else {
+                                        div()
+                                            .whitespace_normal()
+                                            .child(SelectableText::new(
+                                                (ElementId::from(id.clone()), "work-detail"),
+                                                detail,
+                                            ))
+                                            .into_any_element()
+                                    }),
+                            )
+                        })
+                        .when_some(output, |column, output| {
+                            column.child(div().pl_4().child(output))
+                        })
                 })
                 .into_any_element()
         }
@@ -797,6 +847,11 @@ impl Render for ThreadView {
         } else {
             let rows = self.rows.clone();
             let expanded_work = self.expanded_work.clone();
+            let outputs: HashMap<_, _> = self
+                .outputs
+                .iter()
+                .map(|(id, (view, _))| (id.clone(), view.clone()))
+                .collect();
             let active_find = self.active_find.clone();
             let partial = self.state.partial;
             let loading = self.history_task.is_some();
@@ -815,6 +870,7 @@ impl Render for ThreadView {
                             active_find.as_ref(),
                             expanded_work.contains(&rows[ix - 1].entry.id),
                             this.clone(),
+                            outputs.get(&rows[ix - 1].entry.id).cloned(),
                             cx,
                         );
                     }
