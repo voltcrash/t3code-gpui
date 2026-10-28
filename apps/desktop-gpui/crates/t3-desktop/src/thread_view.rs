@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, StyledExt, h_flex, v_flex};
@@ -540,7 +541,7 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
                     .and_then(|active| active.text.clone())
                     .map(|view| view.into_any_element())
                     .unwrap_or_else(|| {
-                        TextView::markdown(id, row.text.clone())
+                        TextView::markdown(id.clone(), row.text.clone())
                             .selectable(true)
                             .into_any_element()
                     }),
@@ -567,7 +568,7 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
                         .and_then(|active| active.text.clone())
                         .map(|view| view.into_any_element())
                         .unwrap_or_else(|| {
-                            TextView::markdown(id, row.text.clone())
+                            TextView::markdown(id.clone(), row.text.clone())
                                 .selectable(true)
                                 .into_any_element()
                         }),
@@ -631,7 +632,36 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
                             .max_w(relative(0.8))
                             .child(attachment.clone()),
                     )
-                })),
+                }))
+                .when(
+                    matches!(
+                        row.entry.content,
+                        TimelineContent::Message { copyable: true, .. }
+                    ),
+                    |column| {
+                        column.child(
+                            h_flex()
+                                .w_full()
+                                .mt_1()
+                                .when(
+                                    matches!(
+                                        row.entry.content,
+                                        TimelineContent::Message {
+                                            role: Role::User,
+                                            ..
+                                        }
+                                    ),
+                                    |actions| actions.justify_end(),
+                                )
+                                .child(
+                                    Clipboard::new((ElementId::from(id), "copy-message"))
+                                        .value(row.text.clone())
+                                        .tooltip("Copy message")
+                                        .accessibility_label("Copy message"),
+                                ),
+                        )
+                    },
+                ),
         )
         .into_any_element()
 }
