@@ -298,9 +298,25 @@ impl Client {
         rpc: &RpcClient,
         attachment: &Attachment,
     ) -> Result<Vec<u8>, Error> {
-        let asset: AssetUrl = rpc.call("assets.createUrl", &json!({"resource":{
-            "_tag":"attachment", "attachmentId":attachment.id, "fileName":attachment.name, "mimeType":attachment.mime_type
-        }})).await?;
+        self.download_asset(rpc, &json!({"_tag":"attachment", "attachmentId":attachment.id, "fileName":attachment.name, "mimeType":attachment.mime_type}), if attachment.kind == "image" { MAX_IMAGE_BYTES } else { MAX_FILE_BYTES }).await
+    }
+    pub async fn download_tool_image(
+        &self,
+        rpc: &RpcClient,
+        image: &crate::tool_images::Image,
+    ) -> Result<Vec<u8>, Error> {
+        self.download_asset(rpc, &image.resource(), MAX_IMAGE_BYTES)
+            .await
+    }
+    async fn download_asset(
+        &self,
+        rpc: &RpcClient,
+        resource: &Value,
+        limit: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let asset: AssetUrl = rpc
+            .call("assets.createUrl", &json!({"resource":resource}))
+            .await?;
         let mut response = self
             .http
             .get(self.url(&asset.relative_url)?)
@@ -310,11 +326,6 @@ impl Client {
         if !response.status().is_success() {
             return Err(Error::Status(response.status().as_u16()));
         }
-        let limit = if attachment.kind == "image" {
-            MAX_IMAGE_BYTES
-        } else {
-            MAX_FILE_BYTES
-        };
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             if bytes.len() as u64 + chunk.len() as u64 > limit {

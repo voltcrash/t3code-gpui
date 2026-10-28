@@ -38,6 +38,7 @@ pub struct Request {
 pub struct Source {
     pub request: Request,
     pub omitted: bool,
+    pub images: Vec<crate::tool_images::Image>,
     pub input: Option<String>,
     pub output: Option<String>,
     pub exit_code: Option<i64>,
@@ -68,6 +69,7 @@ pub fn source(row: &ProjectedTurnItem) -> Option<Source> {
         },
         omitted: item.fields.get("outputOmitted") == Some(&serde_json::Value::Bool(true))
             || (kind == Kind::Dynamic && item.fields.get("input").is_some_and(summarized)),
+        images: crate::tool_images::images(item, &row.source_thread_id, &row.source_item_id),
         input: input(item),
         output: output(item),
         exit_code: item
@@ -150,7 +152,8 @@ fn json_value(value: &serde_json::Value) -> Option<String> {
 }
 
 fn tool_value(value: &serde_json::Value) -> Option<String> {
-    let text = text_blocks(value, 0).or_else(|| json_value(value))?;
+    let images = crate::tool_images::image_blocks(value);
+    let text = text_blocks(value, 0, &images).or_else(|| json_value(value))?;
     if text.trim().is_empty() {
         return None;
     }
@@ -163,7 +166,11 @@ fn tool_value(value: &serde_json::Value) -> Option<String> {
     Some(text)
 }
 
-fn text_blocks(value: &serde_json::Value, depth: usize) -> Option<String> {
+fn text_blocks(
+    value: &serde_json::Value,
+    depth: usize,
+    images: &[&serde_json::Value],
+) -> Option<String> {
     if depth > 4 {
         return None;
     }
@@ -173,7 +180,7 @@ fn text_blocks(value: &serde_json::Value, depth: usize) -> Option<String> {
     if let Some(blocks) = value.as_array() {
         return blocks
             .iter()
-            .map(|block| text_blocks(block, depth + 1))
+            .map(|block| text_blocks(block, depth + 1, images))
             .collect::<Option<Vec<_>>>()
             .map(|parts| {
                 parts
@@ -186,7 +193,16 @@ fn text_blocks(value: &serde_json::Value, depth: usize) -> Option<String> {
     let object = value.as_object()?;
     match value["type"].as_str() {
         Some("text") => return value["text"].as_str().map(str::to_owned),
-        Some("image") => return Some("[image]".into()),
+        Some("image") => {
+            return Some(
+                if images.iter().any(|image| std::ptr::eq(*image, value)) {
+                    ""
+                } else {
+                    "[image]"
+                }
+                .into(),
+            );
+        }
         Some("resource_link") => return value["uri"].as_str().map(str::to_owned),
         Some("resource") => {
             return value["resource"]["text"]
@@ -201,11 +217,12 @@ fn text_blocks(value: &serde_json::Value, depth: usize) -> Option<String> {
         .filter(|key| !matches!(key.as_str(), "isError" | "is_error"))
         .collect();
     if keys.len() == 1 && object.contains_key("content") {
-        return text_blocks(&value["content"], depth + 1);
+        return text_blocks(&value["content"], depth + 1, images);
     }
     if keys.len() == 2 && object.contains_key("content") && object.contains_key("structuredContent")
     {
-        return text_blocks(&value["content"], depth + 1).filter(|text| !text.trim().is_empty());
+        return text_blocks(&value["content"], depth + 1, images)
+            .filter(|text| !text.trim().is_empty());
     }
     None
 }
@@ -299,7 +316,7 @@ mod tests {
         item.fields.insert("output".into(), json!({"content":[{"type":"text","text":"<b>café</b>"},{"type":"resource_link","uri":"file:///example"},{"type":"image","mimeType":"image/png","data":"placeholder"}],"isError":false}));
         assert_eq!(
             output(&item).as_deref(),
-            Some("<b>café</b>\nfile:///example\n[image]")
+            Some("<b>café</b>\nfile:///example")
         );
         item.fields.insert("output".into(), json!({"content":[]}));
         assert_eq!(output(&item), None);

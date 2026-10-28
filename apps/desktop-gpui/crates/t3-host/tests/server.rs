@@ -116,7 +116,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
     verifies_planning(&client).await;
     verifies_sidebar_search(&client).await;
-    verifies_tool_detail(&client).await;
+    verifies_tool_detail(&client, &http, backend.http_base()).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -1041,7 +1041,7 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
     }
 }
 
-async fn verifies_tool_detail(client: &RpcClient) {
+async fn verifies_tool_detail(client: &RpcClient, http: &reqwest::Client, base: &url::Url) {
     let mut stream = client.subscribe::<_, ThreadStreamItem>(
         "orchestration.subscribeThread",
         &json!({"threadId":"output-fixture"}),
@@ -1050,7 +1050,7 @@ async fn verifies_tool_detail(client: &RpcClient) {
     else {
         panic!("expected snapshot");
     };
-    assert_eq!(projection.visible_turn_items.len(), 5);
+    assert_eq!(projection.visible_turn_items.len(), 6);
     for row in &projection.visible_turn_items {
         let source = t3_client::tool_detail::source(row).unwrap();
         assert_eq!(source.omitted, row.item.id != "empty-command");
@@ -1088,6 +1088,39 @@ async fn verifies_tool_detail(client: &RpcClient) {
                 assert_eq!(
                     serde_json::from_str::<Value>(&source.input.unwrap()).unwrap(),
                     json!({"enabled":false,"count":0,"clear":null})
+                );
+            }
+            "image-tool" => {
+                assert!(
+                    source.images.is_empty(),
+                    "images stay out of the wire summary"
+                );
+                assert_eq!(output.as_deref(), Some("Two tool images."));
+                let images = t3_client::tool_images::images(
+                    &item,
+                    &source.request.thread_id,
+                    &source.request.item_id,
+                );
+                assert_eq!(images.len(), 2);
+                let transfer = t3_client::attachments::Client::new(http.clone(), base.clone());
+                let first = transfer
+                    .download_tool_image(client, &images[0])
+                    .await
+                    .unwrap();
+                let second = transfer
+                    .download_tool_image(client, &images[1])
+                    .await
+                    .unwrap();
+                assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
+                assert_eq!(&second[..8], b"\x89PNG\r\n\x1a\n");
+                assert_ne!(first, second, "each asset index resolves its own image");
+                let mut missing = images[0].clone();
+                missing.index = 2;
+                assert!(
+                    transfer
+                        .download_tool_image(client, &missing)
+                        .await
+                        .is_err()
                 );
             }
             _ => panic!("unexpected tool item"),
