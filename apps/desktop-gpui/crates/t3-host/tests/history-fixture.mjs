@@ -177,6 +177,39 @@ await Effect.runPromise(
         },
       });
     }
+    const toolBase = events.at(-1).payload;
+    for (const [id, input, output] of [
+      [
+        "text-tool",
+        { query: "café", payload: "argument ".repeat(4000) },
+        {
+          content: [{ type: "text", text: "<b>literal tool output</b>\nSecond line." }],
+          isError: false,
+        },
+      ],
+      [
+        "structured-tool",
+        { enabled: false, count: 0, clear: null },
+        { result: { count: 0, ok: true } },
+      ],
+    ]) {
+      const { exitCode: _exitCode, ...base } = toolBase;
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...base,
+          id,
+          type: "dynamic_tool",
+          ordinal: events.length,
+          toolName: id,
+          input,
+          output,
+        },
+      });
+    }
     const store = yield* Events.EventStoreV2;
     const projection = yield* Projections.ProjectionStoreV2;
     yield* store.append({ events });
