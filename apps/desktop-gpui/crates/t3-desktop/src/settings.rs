@@ -183,7 +183,7 @@ impl Render for Settings {
                                 v_flex().gap_2()
                                     .child(div().text_lg().font_semibold().child("Notifications"))
                                     .child(h_flex().w_full().gap_4().py_3()
-                                        .child(v_flex().flex_1().gap_1()
+                                        .child(v_flex().flex_1().min_w_0().gap_1()
                                             .child(div().text_sm().font_medium().child("Desktop notifications"))
                                             .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Notify when a background thread needs attention or finishes.")))
                                         .child(Switch::new("desktop-notifications")
