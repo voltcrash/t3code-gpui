@@ -152,7 +152,11 @@ impl Render for ToolDetail {
                     .gap_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Output")
+                    .child(if self.source.request.kind.is_search() {
+                        "Results"
+                    } else {
+                        "Output"
+                    })
                     .when_some(self.exit_code, |header, code| {
                         header.child(format!("Exit {code}"))
                     })
@@ -160,14 +164,8 @@ impl Render for ToolDetail {
                         header.child(
                             Clipboard::new("copy-command-output")
                                 .value(output)
-                                .tooltip(format!(
-                                    "Copy {} output",
-                                    self.source.request.kind.label()
-                                ))
-                                .accessibility_label(format!(
-                                    "Copy {} output",
-                                    self.source.request.kind.label()
-                                )),
+                                .tooltip(self.source.request.kind.copy_label())
+                                .accessibility_label(self.source.request.kind.copy_label()),
                         )
                     }),
             )
@@ -198,7 +196,17 @@ impl Render for ToolDetail {
                         .whitespace_normal()
                         .child(SelectableText::new(
                             "command-output",
-                            self.output.clone().unwrap_or_else(|| "No output.".into()),
+                            self.output.clone().unwrap_or_else(|| {
+                                if self.source.request.kind.is_search() {
+                                    if self.source.request.revision == "live" {
+                                        "Searching…".into()
+                                    } else {
+                                        "No results.".into()
+                                    }
+                                } else {
+                                    "No output.".into()
+                                }
+                            }),
                         )),
                 )
             })

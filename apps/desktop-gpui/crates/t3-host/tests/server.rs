@@ -1050,9 +1050,34 @@ async fn verifies_tool_detail(client: &RpcClient, http: &reqwest::Client, base: 
     else {
         panic!("expected snapshot");
     };
-    assert_eq!(projection.visible_turn_items.len(), 6);
+    assert_eq!(projection.visible_turn_items.len(), 10);
     for row in &projection.visible_turn_items {
         let source = t3_client::tool_detail::source(row).unwrap();
+        if source.request.kind.is_search() {
+            assert!(!source.omitted, "search results are already in the stream");
+            match row.item.id.as_str() {
+                "file-results" => assert_eq!(
+                    source.output.as_deref(),
+                    Some("src/café.rs:12\nfirst match\n  continuation\n\nother.rs")
+                ),
+                "web-results" => assert_eq!(
+                    source.output.as_deref(),
+                    Some(
+                        "GPUI reference\nhttps://example.com/gpui\nNative rendering reference.\n\nhttps://example.com/related"
+                    )
+                ),
+                "empty-search" => {
+                    assert_eq!(source.output, None);
+                    assert_ne!(source.request.revision, "live");
+                }
+                "pending-search" => {
+                    assert_eq!(source.output, None);
+                    assert_eq!(source.request.revision, "live");
+                }
+                _ => panic!("unexpected search"),
+            }
+            continue;
+        }
         assert_eq!(source.omitted, row.item.id != "empty-command");
         assert!(source.output.is_none(), "wire output must remain omitted");
         let response: t3_client::tool_detail::Response = client
