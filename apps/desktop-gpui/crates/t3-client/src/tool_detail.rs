@@ -8,18 +8,27 @@ pub const GET: &str = "orchestration.getTurnItem";
 pub enum Kind {
     Command,
     Dynamic,
+    FileSearch,
+    WebSearch,
 }
 impl Kind {
-    pub fn label(self) -> &'static str {
+    pub fn copy_label(self) -> &'static str {
         match self {
-            Self::Command => "command",
-            Self::Dynamic => "tool",
+            Self::Command => "Copy command output",
+            Self::Dynamic => "Copy tool output",
+            Self::FileSearch | Self::WebSearch => "Copy search results",
         }
+    }
+    pub fn is_search(self) -> bool {
+        matches!(self, Self::FileSearch | Self::WebSearch)
     }
     fn matches(self, item: &TurnItem) -> bool {
         matches!(
             (self, item.kind.as_str()),
-            (Self::Command, "command_execution") | (Self::Dynamic, "dynamic_tool")
+            (Self::Command, "command_execution")
+                | (Self::Dynamic, "dynamic_tool")
+                | (Self::FileSearch, "file_search")
+                | (Self::WebSearch, "web_search")
         )
     }
 }
@@ -49,6 +58,8 @@ pub fn source(row: &ProjectedTurnItem) -> Option<Source> {
     let kind = match item.kind.as_str() {
         "command_execution" => Kind::Command,
         "dynamic_tool" => Kind::Dynamic,
+        "file_search" => Kind::FileSearch,
+        "web_search" => Kind::WebSearch,
         _ => return None,
     };
     Some(Source {
@@ -94,6 +105,9 @@ impl Request {
 }
 
 pub fn output(item: &TurnItem) -> Option<String> {
+    if matches!(item.kind.as_str(), "file_search" | "web_search") {
+        return search_results(item);
+    }
     if item.kind == "dynamic_tool" {
         return item.fields.get("output").and_then(tool_value);
     }
@@ -117,6 +131,45 @@ pub fn output(item: &TurnItem) -> Option<String> {
         return (!text.is_empty()).then_some(text);
     }
     Some(text)
+}
+
+fn search_results(item: &TurnItem) -> Option<String> {
+    let results = item.fields.get("results")?.as_array()?;
+    let blocks: Vec<String> = results
+        .iter()
+        .filter_map(|result| {
+            if item.kind == "file_search" {
+                let name = result["fileName"].as_str()?;
+                let location = result["line"]
+                    .as_u64()
+                    .map_or_else(|| name.to_owned(), |line| format!("{name}:{line}"));
+                let preview = result["preview"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty());
+                Some(preview.map_or_else(|| location.clone(), |text| format!("{location}\n{text}")))
+            } else {
+                let title = result["title"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty());
+                let url = result["url"]
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty());
+                let snippet = result["snippet"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty());
+                let text = [title, url, snippet]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!text.is_empty()).then_some(text)
+            }
+        })
+        .collect();
+    (!blocks.is_empty()).then(|| blocks.join("\n\n"))
 }
 
 fn summarized(value: &serde_json::Value) -> bool {
@@ -338,5 +391,41 @@ mod tests {
         }
         item.fields.insert("output".into(), json!("{\"ok\":true}"));
         assert_eq!(output(&item).unwrap(), "{\n  \"ok\": true\n}");
+    }
+    #[test]
+    fn file_search_results_keep_paths_locations_and_multiline_previews() {
+        let mut row = row();
+        row.item.kind = "file_search".into();
+        row.item.fields.remove("outputOmitted");
+        row.item.fields.insert("results".into(), json!([{"fileName":"src/café.rs","line":12,"column":4,"preview":"  first\n  second  "},{"fileName":"other.rs"}]));
+        let source = source(&row).unwrap();
+        assert_eq!(source.request.kind, Kind::FileSearch);
+        assert!(!source.omitted);
+        assert_eq!(
+            source.output.as_deref(),
+            Some("src/café.rs:12\nfirst\n  second\n\nother.rs")
+        );
+        row.item.fields.insert("results".into(), json!([]));
+        assert_eq!(output(&row.item), None);
+        row.item.fields.remove("results");
+        assert_eq!(output(&row.item), None);
+    }
+    #[test]
+    fn web_search_results_keep_titles_urls_and_snippets_without_markup_interpretation() {
+        let mut row = row();
+        row.item.kind = "web_search".into();
+        row.item.fields.remove("outputOmitted");
+        row.item.fields.insert("results".into(), json!([{"title":"<b>Reference</b>","url":"https://example.com/a?q=café","snippet":" Summary. "},{"url":"https://example.com/b"},{}]));
+        let source = source(&row).unwrap();
+        assert!(!source.omitted);
+        assert!(source.request.kind.is_search());
+        assert_eq!(
+            source.output.as_deref(),
+            Some(
+                "<b>Reference</b>\nhttps://example.com/a?q=café\nSummary.\n\nhttps://example.com/b"
+            )
+        );
+        row.item.fields.insert("results".into(), json!([]));
+        assert_eq!(output(&row.item), None);
     }
 }
