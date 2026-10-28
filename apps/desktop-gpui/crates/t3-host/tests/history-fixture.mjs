@@ -279,6 +279,40 @@ await Effect.runPromise(
         },
       });
     }
+    for (const [id, fields, status] of [
+      [
+        "changed-files",
+        {
+          fileName: "src/café.rs",
+          additions: 3,
+          deletions: 1,
+          changes: [
+            { operation: "update", path: "src/café.rs" },
+            { operation: "rename", oldPath: "old.rs", path: "new.rs" },
+          ],
+          oldStr: "old hidden",
+          newStr: "new hidden",
+          diffStr: "successful patch stays out of the wire",
+        },
+        "completed",
+      ],
+      ["failed-edit", { fileName: "example.rs", diffStr: "@@ -1 +1 @@\n-old\n+new" }, "failed"],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...searchBase,
+          id,
+          type: "file_change",
+          ordinal: events.length,
+          status,
+          ...fields,
+        },
+      });
+    }
     const store = yield* Events.EventStoreV2;
     const projection = yield* Projections.ProjectionStoreV2;
     yield* store.append({ events });
