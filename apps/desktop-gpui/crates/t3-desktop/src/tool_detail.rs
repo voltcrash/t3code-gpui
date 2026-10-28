@@ -1,5 +1,5 @@
 //! Mounted only for expanded tools; arguments and output remain selectable plain text.
-use crate::{environment::LocalEnvironment, tokio_bridge};
+use crate::{attachment_view::AttachmentView, environment::LocalEnvironment, tokio_bridge};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -12,6 +12,7 @@ pub struct ToolDetail {
     source: Source,
     input: Option<SharedString>,
     output: Option<SharedString>,
+    images: Vec<Entity<AttachmentView>>,
     exit_code: Option<i64>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
@@ -23,10 +24,12 @@ impl ToolDetail {
             input: source.input.clone().map(Into::into),
             exit_code: source.exit_code,
             output: source.output.clone().map(Into::into),
+            images: Vec::new(),
             source,
             error: None,
             task: None,
         };
+        view.set_images(view.source.images.clone(), cx);
         if view.source.omitted {
             view.load(cx);
         }
@@ -43,6 +46,7 @@ impl ToolDetail {
             return;
         }
         self.task = None;
+        self.set_images(source.images.clone(), cx);
         self.input = source.input.clone().map(Into::into);
         self.exit_code = source.exit_code;
         self.output = source.output.clone().map(Into::into);
@@ -52,6 +56,12 @@ impl ToolDetail {
             self.load(cx);
         }
         cx.notify();
+    }
+    fn set_images(&mut self, images: Vec<t3_client::tool_images::Image>, cx: &mut Context<Self>) {
+        self.images = images
+            .into_iter()
+            .map(|image| cx.new(|cx| AttachmentView::tool_image(self.env.clone(), image, cx)))
+            .collect();
     }
     fn load(&mut self, cx: &mut Context<Self>) {
         if self.task.is_some() {
@@ -73,6 +83,14 @@ impl ToolDetail {
                 view.task = None;
                 match result {
                     Ok(Ok(Response { item: Some(item) })) if view.source.request.accepts(&item) => {
+                        view.set_images(
+                            t3_client::tool_images::images(
+                                &item,
+                                &view.source.request.thread_id,
+                                &view.source.request.item_id,
+                            ),
+                            cx,
+                        );
                         view.input = tool_detail::input(&item).map(Into::into);
                         view.output = tool_detail::output(&item).map(Into::into);
                         view.exit_code = item
@@ -171,6 +189,7 @@ impl Render for ToolDetail {
                         ),
                 )
             })
+            .children(self.images.iter().cloned())
             .when(self.task.is_none() && self.error.is_none(), |body| {
                 body.child(
                     div()

@@ -177,6 +177,10 @@ await Effect.runPromise(
         },
       });
     }
+    const imageData =
+      "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAlElEQVR4nO3YwQnAIBQFQRtKV6nYNlJEUoJILisMvPOic/zjuufW5vNu7fT+OP0DgAC1+4AAAQIEKNwHBAgQIEDhPiBAP4FqD6r1AQECBAhQuA8IECBAgMJ9QIAAAQIU7juYLQYIECBAgMJ9QIAAAQIU7gMCBAgQoHDfwWwxQIAAAQIU7gMCBAgQoHAfECBAgACF+x+jM3bg2LiAwwAAAABJRU5ErkJggg==";
+    const secondImageData =
+      "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAlklEQVR4nO3YsQmAMBRF0Uxi4ySu4XQuae8IIdjcwIFXX5JT/vE+59KO617a7v2x+wcAAWr3AQECBAhQuA8IECBAgMJ9QIB+AtUeVOsDAgQIEKBwHxAgQIAAhfuAAAECBCjcdzCbDBAgQIAAhfuAAAECBCjcBwQIECBA4b6D2WSAAAECBCjcBwQIECBA4T4gQIAAAQr3P9eCTbQdRoXrAAAAAElFTkSuQmCC";
     const toolBase = events.at(-1).payload;
     for (const [id, input, output] of [
       [
@@ -185,6 +189,20 @@ await Effect.runPromise(
         {
           content: [{ type: "text", text: "<b>literal tool output</b>\nSecond line." }],
           isError: false,
+        },
+      ],
+      [
+        "image-tool",
+        {},
+        {
+          content: [
+            { type: "text", text: "Two tool images." },
+            { type: "image", mimeType: "image/png", data: imageData },
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: secondImageData },
+            },
+          ],
         },
       ],
       [
