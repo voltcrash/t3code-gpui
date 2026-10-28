@@ -29,6 +29,7 @@ pub enum DiffLayout {
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub appearance: Appearance,
+    pub desktop_notifications_enabled: bool,
     pub plan_mode_enabled: bool,
     pub confirm_thread_archive: bool,
     pub confirm_thread_delete: bool,
@@ -43,6 +44,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             appearance: Appearance::System,
+            desktop_notifications_enabled: false,
             plan_mode_enabled: false,
             confirm_thread_archive: false,
             confirm_thread_delete: true,
@@ -127,6 +129,7 @@ mod tests {
         let store = Store::new(&home.0);
         assert_eq!(store.load().unwrap(), Preferences::default());
         assert!(!store.load().unwrap().plan_mode_enabled);
+        assert!(!store.load().unwrap().desktop_notifications_enabled);
         assert!(!home.0.exists());
     }
 
@@ -147,6 +150,7 @@ mod tests {
         assert!(preferences.confirm_thread_delete);
         preferences.confirm_thread_archive = true;
         preferences.plan_mode_enabled = true;
+        preferences.desktop_notifications_enabled = true;
         preferences.diff_layout = DiffLayout::Split;
         preferences.word_wrap = false;
         preferences.diff_ignore_whitespace = false;
@@ -155,6 +159,7 @@ mod tests {
         assert_eq!(fs::read(&server).unwrap(), b"server-owned");
         let saved: Value = serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(saved["futureOption"]["enabled"], true);
+        assert_eq!(saved["desktopNotificationsEnabled"], true);
         assert_eq!(fs::read_dir(home.0.join("userdata")).unwrap().count(), 2);
     }
 

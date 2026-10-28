@@ -142,6 +142,11 @@ impl Workspace {
         let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), window, cx));
         let subscriptions = vec![
+            cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    crate::notifications::clear(cx);
+                }
+            }),
             cx.observe_window_appearance(window, |_, window, cx| {
                 let appearance = crate::preferences::global(cx).read(cx).value.appearance;
                 if appearance == t3_host::preferences::Appearance::System {
@@ -358,6 +363,20 @@ impl Workspace {
                 .update(cx, |sidebar, cx| sidebar.select(id, cx));
         } else {
             self.open_draft(project_id, window, cx);
+        }
+    }
+
+    pub fn open_notification_thread(
+        &mut self,
+        id: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.env.read(cx).shell.threads.contains_key(&id) {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.select(id.into(), cx));
+        } else {
+            tracing::warn!(thread_id = %id, "notification thread is no longer available");
         }
     }
 
