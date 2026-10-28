@@ -116,7 +116,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
     verifies_planning(&client).await;
     verifies_sidebar_search(&client).await;
-    verifies_command_output(&client).await;
+    verifies_tool_detail(&client).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -1041,7 +1041,7 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
     }
 }
 
-async fn verifies_command_output(client: &RpcClient) {
+async fn verifies_tool_detail(client: &RpcClient) {
     let mut stream = client.subscribe::<_, ThreadStreamItem>(
         "orchestration.subscribeThread",
         &json!({"threadId":"output-fixture"}),
@@ -1050,18 +1050,18 @@ async fn verifies_command_output(client: &RpcClient) {
     else {
         panic!("expected snapshot");
     };
-    assert_eq!(projection.visible_turn_items.len(), 3);
+    assert_eq!(projection.visible_turn_items.len(), 5);
     for row in &projection.visible_turn_items {
-        let source = t3_client::command_output::source(row).unwrap();
+        let source = t3_client::tool_detail::source(row).unwrap();
         assert_eq!(source.omitted, row.item.id != "empty-command");
         assert!(source.output.is_none(), "wire output must remain omitted");
-        let response: t3_client::command_output::Response = client
-            .call(t3_client::command_output::GET, &source.request)
+        let response: t3_client::tool_detail::Response = client
+            .call(t3_client::tool_detail::GET, &source.request)
             .await
             .unwrap();
         let item = response.item.unwrap();
         assert!(source.request.accepts(&item));
-        let output = t3_client::command_output::output(&item);
+        let output = t3_client::tool_detail::output(&item);
         match item.id.as_str() {
             "output-command" => assert_eq!(
                 output.unwrap(),
@@ -1069,12 +1069,33 @@ async fn verifies_command_output(client: &RpcClient) {
             ),
             "empty-command" => assert_eq!(output, None),
             "failed-command" => assert_eq!(output.as_deref(), Some("command failed")),
-            _ => panic!("unexpected command"),
+            "text-tool" => {
+                assert_eq!(
+                    source.input, None,
+                    "large arguments must be summarized on the wire"
+                );
+                assert_eq!(item.fields["input"]["payload"], "argument ".repeat(4000));
+                assert_eq!(
+                    output.as_deref(),
+                    Some("<b>literal tool output</b>\nSecond line.")
+                );
+            }
+            "structured-tool" => {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&output.unwrap()).unwrap(),
+                    json!({"result":{"count":0,"ok":true}})
+                );
+                assert_eq!(
+                    serde_json::from_str::<Value>(&source.input.unwrap()).unwrap(),
+                    json!({"enabled":false,"count":0,"clear":null})
+                );
+            }
+            _ => panic!("unexpected tool item"),
         }
     }
-    let missing: t3_client::command_output::Response = client
+    let missing: t3_client::tool_detail::Response = client
         .call(
-            t3_client::command_output::GET,
+            t3_client::tool_detail::GET,
             &json!({"threadId":"output-fixture","itemId":"missing"}),
         )
         .await

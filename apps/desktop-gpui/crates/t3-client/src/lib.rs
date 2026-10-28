@@ -7,7 +7,6 @@ pub mod attachments;
 pub mod auth;
 pub mod bootstrap_token;
 pub mod checkpoint;
-pub mod command_output;
 pub mod commands;
 pub mod config;
 pub mod find;
@@ -23,5 +22,6 @@ pub mod shell;
 pub mod thread;
 pub mod thread_actions;
 pub mod thread_search;
+pub mod tool_detail;
 
 pub use rpc::{RpcClient, RpcError, Subscription};

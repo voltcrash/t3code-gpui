@@ -1,24 +1,26 @@
-//! Mounted only for expanded commands; output is never executed or parsed as markup.
+//! Mounted only for expanded tools; arguments and output remain selectable plain text.
 use crate::{environment::LocalEnvironment, tokio_bridge};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{base::SelectableText, *};
-use t3_client::command_output::{self, Response, Source};
+use t3_client::tool_detail::{self, Response, Source};
 
-pub struct CommandOutput {
+pub struct ToolDetail {
     env: Entity<LocalEnvironment>,
     source: Source,
+    input: Option<SharedString>,
     output: Option<SharedString>,
     exit_code: Option<i64>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
 }
-impl CommandOutput {
+impl ToolDetail {
     pub fn new(env: Entity<LocalEnvironment>, source: Source, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             env,
+            input: source.input.clone().map(Into::into),
             exit_code: source.exit_code,
             output: source.output.clone().map(Into::into),
             source,
@@ -34,7 +36,14 @@ impl CommandOutput {
         if self.source == source {
             return;
         }
+        // Streamed arguments can change without changing the live revision.
+        // Keep its existing read until completion gives us a new revision.
+        if self.source.request == source.request && self.source.omitted && source.omitted {
+            self.source = source;
+            return;
+        }
         self.task = None;
+        self.input = source.input.clone().map(Into::into);
         self.exit_code = source.exit_code;
         self.output = source.output.clone().map(Into::into);
         self.source = source;
@@ -49,14 +58,14 @@ impl CommandOutput {
             return;
         }
         let Some(rpc) = self.env.read(cx).rpc.clone() else {
-            self.error = Some("Reconnect to load command output.".into());
+            self.error = Some("Reconnect to load tool details.".into());
             cx.notify();
             return;
         };
         self.error = None;
         let request = self.source.request.clone();
         let reading = tokio_bridge::spawn(cx, async move {
-            rpc.call::<_, Response>(command_output::GET, &request).await
+            rpc.call::<_, Response>(tool_detail::GET, &request).await
         });
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = reading.await;
@@ -64,7 +73,8 @@ impl CommandOutput {
                 view.task = None;
                 match result {
                     Ok(Ok(Response { item: Some(item) })) if view.source.request.accepts(&item) => {
-                        view.output = command_output::output(&item).map(Into::into);
+                        view.input = tool_detail::input(&item).map(Into::into);
+                        view.output = tool_detail::output(&item).map(Into::into);
                         view.exit_code = item
                             .fields
                             .get("exitCode")
@@ -72,13 +82,13 @@ impl CommandOutput {
                     }
                     Ok(Ok(_)) => {
                         view.error =
-                            Some("Command output is no longer available at this revision.".into())
+                            Some("Tool detail is no longer available at this revision.".into())
                     }
                     Ok(Err(error)) => {
-                        view.error = Some(format!("Could not load command output: {error}").into())
+                        view.error = Some(format!("Could not load tool details: {error}").into())
                     }
                     Err(error) => {
-                        view.error = Some(format!("Could not load command output: {error}").into())
+                        view.error = Some(format!("Could not load tool details: {error}").into())
                     }
                 }
                 cx.notify();
@@ -87,12 +97,38 @@ impl CommandOutput {
         cx.notify();
     }
 }
-impl Render for CommandOutput {
+impl Render for ToolDetail {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .w_full()
             .min_w_0()
             .gap_2()
+            .when_some(self.input.clone(), |body, input| {
+                body.child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Arguments")
+                                .child(
+                                    Clipboard::new("copy-tool-arguments")
+                                        .value(input.clone())
+                                        .tooltip("Copy tool arguments")
+                                        .accessibility_label("Copy tool arguments"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .whitespace_normal()
+                                .child(SelectableText::new("tool-arguments", input)),
+                        ),
+                )
+            })
             .child(
                 h_flex()
                     .gap_2()
@@ -106,8 +142,14 @@ impl Render for CommandOutput {
                         header.child(
                             Clipboard::new("copy-command-output")
                                 .value(output)
-                                .tooltip("Copy command output")
-                                .accessibility_label("Copy command output"),
+                                .tooltip(format!(
+                                    "Copy {} output",
+                                    self.source.request.kind.label()
+                                ))
+                                .accessibility_label(format!(
+                                    "Copy {} output",
+                                    self.source.request.kind.label()
+                                )),
                         )
                     }),
             )
@@ -123,7 +165,7 @@ impl Render for CommandOutput {
                             Button::new("retry-output")
                                 .ghost()
                                 .xsmall()
-                                .label("Retry loading output")
+                                .label("Retry loading details")
                                 .disabled(self.task.is_some())
                                 .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
                         ),

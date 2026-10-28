@@ -4,7 +4,6 @@ mod attachment_draft;
 mod attachment_image;
 mod attachment_view;
 mod changes;
-mod command_output;
 mod composer;
 mod desktop;
 mod draft_view;
@@ -20,6 +19,7 @@ mod thread_actions;
 mod thread_find;
 mod thread_view;
 mod tokio_bridge;
+mod tool_detail;
 mod workspace;
 
 use tracing_subscriber::EnvFilter;
