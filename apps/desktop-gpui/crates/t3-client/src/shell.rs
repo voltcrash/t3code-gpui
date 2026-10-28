@@ -28,6 +28,7 @@ pub struct Project {
 #[serde(rename_all = "camelCase")]
 pub struct Lineage {
     pub relationship_to_parent: Option<String>,
+    pub parent_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +65,7 @@ pub struct ThreadShell {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    pub creation_source: Option<String>,
     #[serde(default)]
     pub lineage: Lineage,
     #[serde(default)]
@@ -73,8 +75,11 @@ pub struct ThreadShell {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub status: String,
-    pub activity_run_status: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub activity_run_status: Option<Option<String>>,
     pub latest_run_id: Option<String>,
+    #[serde(default)]
+    pub latest_run_stop_requested: bool,
     pub active_run_id: Option<String>,
     pub latest_run_requested_at: Option<String>,
     pub latest_run_started_at: Option<String>,
@@ -310,11 +315,14 @@ impl ThreadShell {
         Some(if parked {
             "idle"
         } else {
-            self.activity_run_status.as_deref().unwrap_or(&self.status)
+            self.activity_run_status
+                .as_ref()
+                .and_then(|status| status.as_deref())
+                .unwrap_or(&self.status)
         })
     }
 
-    fn latest_run_status(&self) -> Option<&str> {
+    pub fn latest_run_status(&self) -> Option<&str> {
         self.latest_run_id.as_ref()?;
         Some(if self.status == "idle" {
             "completed"

@@ -179,6 +179,25 @@ impl Render for Settings {
                                         ),
                                     ),
                             )
+                            .when(cfg!(target_os = "linux"), |column| column.child(
+                                v_flex().gap_2()
+                                    .child(div().text_lg().font_semibold().child("Notifications"))
+                                    .child(h_flex().w_full().gap_4().py_3()
+                                        .child(v_flex().flex_1().min_w_0().gap_1()
+                                            .child(div().text_sm().font_medium().child("Desktop notifications"))
+                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Notify when a background thread needs attention or finishes.")))
+                                        .child(Switch::new("desktop-notifications")
+                                            .accessibility_label("Desktop notifications")
+                                            .checked(state.value.desktop_notifications_enabled)
+                                            .disabled(disabled)
+                                            .on_change({ let model = model.clone(); move |enabled, window, cx| {
+                                                model.update(cx, |state, cx| {
+                                                    let mut value = state.value.clone();
+                                                    value.desktop_notifications_enabled = *enabled;
+                                                    state.change(value, window, cx);
+                                                });
+                                            }})))
+                            ))
                             .child(
                                 v_flex()
                                     .gap_2()

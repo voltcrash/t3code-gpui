@@ -10,6 +10,7 @@ mod draft_view;
 mod environment;
 mod format;
 mod launch;
+mod notifications;
 mod preferences;
 mod project_picker;
 mod settings;
@@ -47,6 +48,7 @@ fn main() -> anyhow::Result<()> {
         cx.set_global(Tokio(runtime));
         workspace::bind_keys(cx);
         preferences::init(preference_store, loaded_preferences, cx);
+        notifications::init(cx);
 
         desktop::init(launch, cx);
     });
