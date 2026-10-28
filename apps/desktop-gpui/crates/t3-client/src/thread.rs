@@ -933,7 +933,10 @@ fn entry_content(
                 detail,
                 status: work_status(&item.status),
                 thinking: item.kind == "reasoning",
-                tool: matches!(item.kind.as_str(), "command_execution" | "dynamic_tool"),
+                tool: matches!(
+                    item.kind.as_str(),
+                    "command_execution" | "dynamic_tool" | "file_search" | "web_search"
+                ),
             }
         }
     }

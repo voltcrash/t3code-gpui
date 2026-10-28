@@ -228,6 +228,57 @@ await Effect.runPromise(
         },
       });
     }
+    const { input: _input, output: _output, exitCode: _exitCode, ...searchBase } = toolBase;
+    for (const [type, id, fields, status] of [
+      [
+        "file_search",
+        "file-results",
+        {
+          pattern: "native",
+          results: [
+            {
+              fileName: "src/café.rs",
+              line: 12,
+              column: 4,
+              preview: "first match\n  continuation",
+            },
+            { fileName: "other.rs" },
+          ],
+        },
+      ],
+      [
+        "web_search",
+        "web-results",
+        {
+          patterns: ["GPUI reference"],
+          results: [
+            {
+              title: "GPUI reference",
+              url: "https://example.com/gpui",
+              snippet: "Native rendering reference.",
+            },
+            { url: "https://example.com/related" },
+          ],
+        },
+      ],
+      ["web_search", "empty-search", { patterns: ["missing"], results: [] }],
+      ["file_search", "pending-search", { pattern: "in progress", results: [] }, "running"],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...searchBase,
+          id,
+          type,
+          ordinal: events.length,
+          status: status ?? "completed",
+          ...fields,
+        },
+      });
+    }
     const store = yield* Events.EventStoreV2;
     const projection = yield* Projections.ProjectionStoreV2;
     yield* store.append({ events });
