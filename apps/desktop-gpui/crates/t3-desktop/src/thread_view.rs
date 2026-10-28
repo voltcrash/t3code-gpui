@@ -21,11 +21,11 @@ use t3_client::thread::{
 
 use crate::appearance::CONTENT_WIDTH;
 use crate::attachment_view::AttachmentView;
-use crate::command_output::CommandOutput;
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
 use crate::thread_find::{FindEvent, FindText, ThreadFind};
 use crate::tokio_bridge;
+use crate::tool_detail::ToolDetail;
 
 /// `subscribeDynamic` retries an expected failure after 250ms; backing off
 /// keeps a thread that keeps failing from spinning.
@@ -55,7 +55,7 @@ pub struct ThreadView {
     state: ThreadState,
     rows: Rc<[Row]>,
     expanded_work: Rc<HashSet<String>>,
-    outputs: HashMap<String, (Entity<CommandOutput>, Subscription)>,
+    outputs: HashMap<String, (Entity<ToolDetail>, Subscription)>,
     pending: PendingRequests,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<Composer>,
@@ -400,10 +400,7 @@ impl ThreadView {
         let Some(index) = self.rows.iter().position(|row| {
             row.entry.id == id
                 && (row.detail.is_some()
-                    || matches!(
-                        row.entry.content,
-                        TimelineContent::Work { command: true, .. }
-                    ))
+                    || matches!(row.entry.content, TimelineContent::Work { tool: true, .. }))
         }) else {
             return;
         };
@@ -426,7 +423,7 @@ impl ThreadView {
             .flat_map(|projection| &projection.visible_turn_items)
             .filter(|row| self.expanded_work.contains(&row.item.id))
             .filter_map(|row| {
-                t3_client::command_output::source(row).map(|source| (row.item.id.clone(), source))
+                t3_client::tool_detail::source(row).map(|source| (row.item.id.clone(), source))
             })
             .collect();
         self.outputs.retain(|id, _| sources.contains_key(id));
@@ -434,7 +431,7 @@ impl ThreadView {
             if let Some((view, _)) = self.outputs.get(&id) {
                 view.update(cx, |view, cx| view.set_source(source, cx));
             } else {
-                let view = cx.new(|cx| CommandOutput::new(self.env.clone(), source, cx));
+                let view = cx.new(|cx| ToolDetail::new(self.env.clone(), source, cx));
                 let item_id = id.clone();
                 let observer = cx.observe(&view, move |this, _, cx| {
                     if let Some(index) = this.rows.iter().position(|row| row.entry.id == item_id) {
@@ -463,7 +460,7 @@ impl ThreadView {
             return;
         }
         if !self.expanded_work.is_empty() {
-            let expandable: HashSet<&str> = entries.iter().filter(|entry| matches!(&entry.content, TimelineContent::Work { detail: Some(detail), .. } if !detail.trim().is_empty()) || matches!(entry.content, TimelineContent::Work { command: true, .. })).map(|entry| entry.id.as_str()).collect();
+            let expandable: HashSet<&str> = entries.iter().filter(|entry| matches!(&entry.content, TimelineContent::Work { detail: Some(detail), .. } if !detail.trim().is_empty()) || matches!(entry.content, TimelineContent::Work { tool: true, .. })).map(|entry| entry.id.as_str()).collect();
             Rc::make_mut(&mut self.expanded_work).retain(|id| expandable.contains(id.as_str()));
         }
         let old_len = self.rows.len();
@@ -569,7 +566,7 @@ fn render_row(
     active_find: Option<&ActiveFind>,
     expanded: bool,
     owner: WeakEntity<ThreadView>,
-    output: Option<Entity<CommandOutput>>,
+    output: Option<Entity<ToolDetail>>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -661,7 +658,7 @@ fn render_row(
         TimelineContent::Work {
             status,
             thinking,
-            command,
+            tool,
             ..
         } => {
             let color = match status {
@@ -676,7 +673,7 @@ fn render_row(
                 .gap_2()
                 .text_xs()
                 .text_color(color)
-                .child(if detail.is_some() || *command {
+                .child(if detail.is_some() || *tool {
                     let entry_id = row.entry.id.clone();
                     Button::new((ElementId::from(id.clone()), "toggle-details"))
                         .ghost()

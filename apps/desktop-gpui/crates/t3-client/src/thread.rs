@@ -758,7 +758,7 @@ pub enum TimelineContent {
         detail: Option<String>,
         status: WorkStatus,
         thinking: bool,
-        command: bool,
+        tool: bool,
     },
     /// Fork, handoff, interrupt, subagent and secret cards.
     Event {
@@ -933,7 +933,7 @@ fn entry_content(
                 detail,
                 status: work_status(&item.status),
                 thinking: item.kind == "reasoning",
-                command: item.kind == "command_execution",
+                tool: matches!(item.kind.as_str(), "command_execution" | "dynamic_tool"),
             }
         }
     }
@@ -1483,7 +1483,7 @@ mod tests {
                 detail: Some("cargo test".into()),
                 status: WorkStatus::Completed,
                 thinking: false,
-                command: true,
+                tool: true,
             }
         );
     }
