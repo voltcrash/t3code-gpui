@@ -116,6 +116,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
     verifies_planning(&client).await;
     verifies_sidebar_search(&client).await;
+    verifies_command_output(&client).await;
 
     let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
     assert!(
@@ -1038,4 +1039,45 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
             }
         }
     }
+}
+
+async fn verifies_command_output(client: &RpcClient) {
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        "orchestration.subscribeThread",
+        &json!({"threadId":"output-fixture"}),
+    );
+    let ThreadStreamItem::Snapshot { projection, .. } = stream.next().await.unwrap().unwrap()
+    else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(projection.visible_turn_items.len(), 3);
+    for row in &projection.visible_turn_items {
+        let source = t3_client::command_output::source(row).unwrap();
+        assert_eq!(source.omitted, row.item.id != "empty-command");
+        assert!(source.output.is_none(), "wire output must remain omitted");
+        let response: t3_client::command_output::Response = client
+            .call(t3_client::command_output::GET, &source.request)
+            .await
+            .unwrap();
+        let item = response.item.unwrap();
+        assert!(source.request.accepts(&item));
+        let output = t3_client::command_output::output(&item);
+        match item.id.as_str() {
+            "output-command" => assert_eq!(
+                output.unwrap(),
+                format!("café\n{}", "output line\n".repeat(400))
+            ),
+            "empty-command" => assert_eq!(output, None),
+            "failed-command" => assert_eq!(output.as_deref(), Some("command failed")),
+            _ => panic!("unexpected command"),
+        }
+    }
+    let missing: t3_client::command_output::Response = client
+        .call(
+            t3_client::command_output::GET,
+            &json!({"threadId":"output-fixture","itemId":"missing"}),
+        )
+        .await
+        .unwrap();
+    assert!(missing.item.is_none());
 }

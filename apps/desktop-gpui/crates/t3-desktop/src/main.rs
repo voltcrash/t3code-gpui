@@ -4,6 +4,7 @@ mod attachment_draft;
 mod attachment_image;
 mod attachment_view;
 mod changes;
+mod command_output;
 mod composer;
 mod desktop;
 mod draft_view;

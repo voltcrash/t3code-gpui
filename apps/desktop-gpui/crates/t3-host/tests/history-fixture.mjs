@@ -138,6 +138,45 @@ await Effect.runPromise(
         });
       }
     }
+    const outputThread = "output-fixture";
+    events.push({
+      ...events[0],
+      id: "output-thread-created",
+      threadId: outputThread,
+      payload: { ...events[0].payload, id: outputThread, title: "Command output fixture" },
+    });
+    for (const [id, input, output, exitCode] of [
+      ["output-command", "printf 'café\\n'", "café\n" + "output line\n".repeat(400), 0],
+      ["empty-command", "true", "", 0],
+      ["failed-command", "false", '{"stdout":"","stderr":"command failed","interrupted":false}', 1],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          id,
+          threadId: outputThread,
+          type: "command_execution",
+          ordinal: events.length,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          status: "completed",
+          title: null,
+          input,
+          output,
+          exitCode,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    }
     const store = yield* Events.EventStoreV2;
     const projection = yield* Projections.ProjectionStoreV2;
     yield* store.append({ events });
