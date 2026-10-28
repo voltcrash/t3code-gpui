@@ -1,9 +1,12 @@
 //! The open thread's conversation, live from `orchestration.subscribeThread`.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -34,6 +37,7 @@ struct Row {
     /// Kept across rebuilds while the entry is unchanged, so the markdown view
     /// recognizes its text without comparing it.
     text: SharedString,
+    detail: Option<SharedString>,
     attachments: Vec<Entity<AttachmentView>>,
 }
 
@@ -49,6 +53,7 @@ pub struct ThreadView {
     thread_id: SharedString,
     state: ThreadState,
     rows: Rc<[Row]>,
+    expanded_work: Rc<HashSet<String>>,
     pending: PendingRequests,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<Composer>,
@@ -126,6 +131,7 @@ impl ThreadView {
             thread_id,
             state: ThreadState::default(),
             rows: Rc::from([]),
+            expanded_work: Rc::default(),
             pending: PendingRequests::default(),
             scroller,
             composer,
@@ -385,6 +391,24 @@ impl ThreadView {
         cx.notify();
     }
 
+    fn toggle_work(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| row.entry.id == id && row.detail.is_some())
+        else {
+            return;
+        };
+        let expanded = Rc::make_mut(&mut self.expanded_work);
+        if !expanded.remove(id) {
+            expanded.insert(id.to_owned());
+        }
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.remeasure_items(index + 1..index + 2, cx);
+        });
+        cx.notify();
+    }
+
     /// Rebuilds the rows and remeasures only from the first one that changed,
     /// which during streaming is the last row.
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
@@ -397,6 +421,10 @@ impl ThreadView {
             .count();
         if unchanged == entries.len() && unchanged == self.rows.len() {
             return;
+        }
+        if !self.expanded_work.is_empty() {
+            let expandable: HashSet<&str> = entries.iter().filter(|entry| matches!(&entry.content, TimelineContent::Work { detail: Some(detail), .. } if !detail.trim().is_empty())).map(|entry| entry.id.as_str()).collect();
+            Rc::make_mut(&mut self.expanded_work).retain(|id| expandable.contains(id.as_str()));
         }
         let old_len = self.rows.len();
         // Keep the unchanged suffix when a history page prepends rows. Splicing only
@@ -434,6 +462,13 @@ impl ThreadView {
                             _ => Vec::new(),
                         };
                         Row {
+                            detail: match &entry.content {
+                                TimelineContent::Work { detail, .. } => detail
+                                    .as_ref()
+                                    .filter(|detail| !detail.trim().is_empty())
+                                    .map(|detail| SharedString::from(detail.clone())),
+                                _ => None,
+                            },
                             text: row_text(&entry.content),
                             entry,
                             attachments,
@@ -488,7 +523,14 @@ fn gap_before(rows: &[Row], ix: usize) -> Pixels {
     }
 }
 
-fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &App) -> AnyElement {
+fn render_row(
+    rows: &[Row],
+    ix: usize,
+    active_find: Option<&ActiveFind>,
+    expanded: bool,
+    owner: WeakEntity<ThreadView>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let row = &rows[ix];
     let active = active_find.filter(|active| active.selected.entry_id == row.entry.id);
@@ -576,32 +618,93 @@ fn render_row(rows: &[Row], ix: usize, active_find: Option<&ActiveFind>, cx: &Ap
             )
             .into_any_element(),
         TimelineContent::Work {
-            detail,
-            status,
-            thinking,
-            ..
+            status, thinking, ..
         } => {
             let color = match status {
                 WorkStatus::InProgress => theme.foreground,
                 WorkStatus::Failed => theme.danger,
                 _ => theme.muted_foreground,
             };
-            h_flex()
+            let detail = row.detail.clone();
+            let header = h_flex()
                 .w_full()
                 .min_w_0()
                 .gap_2()
                 .text_xs()
                 .text_color(color)
-                .child(div().flex_none().child(row.text.clone()))
-                .when_some(detail.clone().filter(|_| !thinking), |line, detail| {
-                    line.child(
+                .child(if detail.is_some() {
+                    let entry_id = row.entry.id.clone();
+                    Button::new((ElementId::from(id.clone()), "toggle-details"))
+                        .ghost()
+                        .xsmall()
+                        .icon(if expanded {
+                            Lucide::ChevronDown
+                        } else {
+                            Lucide::ChevronRight
+                        })
+                        .child(div().text_color(color).child(row.text.clone()))
+                        .tooltip(if expanded {
+                            "Hide activity details"
+                        } else {
+                            "Show activity details"
+                        })
+                        .accessibility_label(format!(
+                            "{} {} details",
+                            if expanded { "Hide" } else { "Show" },
+                            row.text
+                        ))
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |view, cx| view.toggle_work(&entry_id, cx));
+                        })
+                        .into_any_element()
+                } else {
+                    div().child(row.text.clone()).into_any_element()
+                })
+                .when_some(
+                    detail.clone().filter(|_| !thinking && !expanded),
+                    |line, detail| {
+                        line.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.muted_foreground.opacity(0.75))
+                                .child(first_line(&detail)),
+                        )
+                    },
+                );
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(header)
+                .when_some(detail.filter(|_| expanded), |column, detail| {
+                    column.child(
                         div()
-                            .flex_1()
+                            .w_full()
                             .min_w_0()
-                            .truncate()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_color(theme.muted_foreground.opacity(0.75))
-                            .child(first_line(&detail)),
+                            .pl_4()
+                            .text_sm()
+                            .when(!thinking, |body| {
+                                body.font_family(theme.mono_font_family.clone())
+                            })
+                            .child(if *thinking {
+                                TextView::markdown(
+                                    (ElementId::from(id.clone()), "work-detail"),
+                                    detail,
+                                )
+                                .selectable(true)
+                                .into_any_element()
+                            } else {
+                                div()
+                                    .whitespace_normal()
+                                    .child(SelectableText::new(
+                                        (ElementId::from(id.clone()), "work-detail"),
+                                        detail,
+                                    ))
+                                    .into_any_element()
+                            }),
                     )
                 })
                 .into_any_element()
@@ -693,6 +796,7 @@ impl Render for ThreadView {
                 .into_any_element()
         } else {
             let rows = self.rows.clone();
+            let expanded_work = self.expanded_work.clone();
             let active_find = self.active_find.clone();
             let partial = self.state.partial;
             let loading = self.history_task.is_some();
@@ -705,7 +809,14 @@ impl Render for ThreadView {
                 self.scroller.clone(),
                 move |ix, _, cx| {
                     if ix > 0 {
-                        return render_row(&rows, ix - 1, active_find.as_ref(), cx);
+                        return render_row(
+                            &rows,
+                            ix - 1,
+                            active_find.as_ref(),
+                            expanded_work.contains(&rows[ix - 1].entry.id),
+                            this.clone(),
+                            cx,
+                        );
                     }
                     if !partial {
                         return div().into_any_element();
