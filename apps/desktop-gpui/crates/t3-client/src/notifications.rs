@@ -214,4 +214,81 @@ mod tests {
         );
         assert!(tracker.update(&shell(vec![archived]), true).is_empty());
     }
+
+    #[test]
+    fn attention_types_follow_runtime_requests_and_new_runs_can_notify_again() {
+        for (extra, title) in [
+            (
+                json!({"pendingRuntimeRequest":{"kind":"user_input"}}),
+                "Input needed",
+            ),
+            (
+                json!({"pendingRuntimeRequest":{"kind":"command"}}),
+                "Approval needed",
+            ),
+            (json!({"status":"failed"}), "Thread failed"),
+            (
+                json!({"status":"failed","lastErrorClass":"usage_limit"}),
+                "Usage limit reached",
+            ),
+        ] {
+            let mut tracker = Tracker::default();
+            tracker.update(&shell(vec![thread("a", json!({}))]), false);
+            let mut pending = thread("a", extra);
+            assert_eq!(
+                tracker.update(&shell(vec![pending.clone()]), true)[0].title,
+                title
+            );
+            assert!(
+                tracker
+                    .update(&shell(vec![pending.clone()]), true)
+                    .is_empty()
+            );
+            pending.latest_run_id = Some("next-run".into());
+            assert_eq!(tracker.update(&shell(vec![pending]), true)[0].title, title);
+        }
+        for request in [
+            json!({"kind":"auth_refresh"}),
+            json!({"kind":"user_input","blocking":false}),
+        ] {
+            let mut tracker = Tracker::default();
+            tracker.update(&shell(vec![thread("a", json!({}))]), false);
+            assert!(
+                tracker
+                    .update(
+                        &shell(vec![thread("a", json!({"pendingRuntimeRequest": request}))]),
+                        true
+                    )
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn replay_and_removal_reset_the_baseline_without_emitting_old_alerts() {
+        let mut tracker = Tracker::default();
+        let running = || thread("a", json!({}));
+        let completed = || {
+            thread(
+                "a",
+                json!({"status":"completed","latestRunCompletedAt":"2026-01-01T01:00:00Z"}),
+            )
+        };
+        tracker.update(&shell(vec![running()]), false);
+        assert!(tracker.update(&shell(vec![completed()]), false).is_empty());
+        assert!(tracker.update(&shell(vec![completed()]), true).is_empty());
+        tracker.update(&shell(vec![]), true);
+        assert!(tracker.update(&shell(vec![completed()]), true).is_empty());
+        tracker.update(&shell(vec![running()]), true);
+        // Replaying an already-seen completion must not turn an unrelated update into an alert.
+        assert!(tracker.update(&shell(vec![completed()]), true).is_empty());
+        let newer = thread(
+            "a",
+            json!({"status":"completed","latestRunId":"r2","latestRunCompletedAt":"2026-01-01T02:00:00Z"}),
+        );
+        assert_eq!(
+            tracker.update(&shell(vec![newer]), true)[0].title,
+            "Thread completed"
+        );
+    }
 }

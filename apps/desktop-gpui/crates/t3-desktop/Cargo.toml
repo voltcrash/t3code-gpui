@@ -7,7 +7,6 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-futures-channel = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false }
 gpui-kit = "0.8"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
