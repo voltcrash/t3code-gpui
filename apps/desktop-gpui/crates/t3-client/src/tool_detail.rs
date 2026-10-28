@@ -10,6 +10,7 @@ pub enum Kind {
     Dynamic,
     FileSearch,
     WebSearch,
+    FileChange,
 }
 impl Kind {
     pub fn copy_label(self) -> &'static str {
@@ -17,6 +18,14 @@ impl Kind {
             Self::Command => "Copy command output",
             Self::Dynamic => "Copy tool output",
             Self::FileSearch | Self::WebSearch => "Copy search results",
+            Self::FileChange => "Copy file changes",
+        }
+    }
+    pub fn heading(self) -> &'static str {
+        match self {
+            Self::FileSearch | Self::WebSearch => "Results",
+            Self::FileChange => "Changes",
+            _ => "Output",
         }
     }
     pub fn is_search(self) -> bool {
@@ -29,6 +38,7 @@ impl Kind {
                 | (Self::Dynamic, "dynamic_tool")
                 | (Self::FileSearch, "file_search")
                 | (Self::WebSearch, "web_search")
+                | (Self::FileChange, "file_change")
         )
     }
 }
@@ -60,6 +70,7 @@ pub fn source(row: &ProjectedTurnItem) -> Option<Source> {
         "dynamic_tool" => Kind::Dynamic,
         "file_search" => Kind::FileSearch,
         "web_search" => Kind::WebSearch,
+        "file_change" => Kind::FileChange,
         _ => return None,
     };
     Some(Source {
@@ -105,6 +116,9 @@ impl Request {
 }
 
 pub fn output(item: &TurnItem) -> Option<String> {
+    if item.kind == "file_change" {
+        return file_changes(item);
+    }
     if matches!(item.kind.as_str(), "file_search" | "web_search") {
         return search_results(item);
     }
@@ -131,6 +145,49 @@ pub fn output(item: &TurnItem) -> Option<String> {
         return (!text.is_empty()).then_some(text);
     }
     Some(text)
+}
+
+fn file_changes(item: &TurnItem) -> Option<String> {
+    let files: Vec<String> = item
+        .fields
+        .get("changes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|change| {
+            let path = change["path"].as_str()?;
+            let operation = change["operation"].as_str()?;
+            Some(if let Some(old) = change["oldPath"].as_str() {
+                format!("{operation} {old} → {path}")
+            } else {
+                format!("{operation} {path}")
+            })
+        })
+        .collect();
+    let files = if files.is_empty() {
+        item.str("fileName")?.to_owned()
+    } else {
+        files.join("\n")
+    };
+    let mut blocks = vec![files];
+    let counts: Vec<String> = [("additions", "+"), ("deletions", "-")]
+        .into_iter()
+        .filter_map(|(field, sign)| {
+            item.fields
+                .get(field)?
+                .as_u64()
+                .map(|count| format!("{sign}{count}"))
+        })
+        .collect();
+    if !counts.is_empty() {
+        blocks.push(format!("Lines: {}", counts.join(" ")));
+    }
+    if item.status == "failed"
+        && let Some(patch) = item.str("diffStr").filter(|patch| !patch.trim().is_empty())
+    {
+        blocks.push(format!("Attempted patch\n{patch}"));
+    }
+    Some(blocks.join("\n\n"))
 }
 
 fn search_results(item: &TurnItem) -> Option<String> {
@@ -427,5 +484,43 @@ mod tests {
         );
         row.item.fields.insert("results".into(), json!([]));
         assert_eq!(output(&row.item), None);
+    }
+    #[test]
+    fn file_changes_keep_operations_rename_paths_and_only_supplied_counts() {
+        let mut row = row();
+        row.item.kind = "file_change".into();
+        row.item.fields.remove("outputOmitted");
+        row.item
+            .fields
+            .insert("fileName".into(), "src/café.rs".into());
+        row.item.fields.insert("changes".into(), json!([{"operation":"update","path":"src/café.rs"},{"operation":"rename","oldPath":"old.rs","path":"new.rs"},{"operation":"delete","path":"gone.rs"}]));
+        row.item.fields.insert("additions".into(), 0.into());
+        let source = source(&row).unwrap();
+        assert!(!source.omitted);
+        assert_eq!(
+            source.output.as_deref(),
+            Some("update src/café.rs\nrename old.rs → new.rs\ndelete gone.rs\n\nLines: +0")
+        );
+        row.item.fields.remove("changes");
+        row.item.fields.remove("additions");
+        assert_eq!(output(&row.item).as_deref(), Some("src/café.rs"));
+    }
+    #[test]
+    fn failed_edit_patches_remain_distinct_from_successful_file_changes() {
+        let mut row = row();
+        row.item.kind = "file_change".into();
+        row.item
+            .fields
+            .insert("fileName".into(), "example.rs".into());
+        row.item
+            .fields
+            .insert("diffStr".into(), "@@ -1 +1 @@\n-old\n+new".into());
+        row.item.status = "completed".into();
+        assert_eq!(output(&row.item).as_deref(), Some("example.rs"));
+        row.item.status = "failed".into();
+        assert_eq!(
+            output(&row.item).as_deref(),
+            Some("example.rs\n\nAttempted patch\n@@ -1 +1 @@\n-old\n+new")
+        );
     }
 }

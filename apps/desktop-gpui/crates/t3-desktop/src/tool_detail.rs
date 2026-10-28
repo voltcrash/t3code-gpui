@@ -152,11 +152,7 @@ impl Render for ToolDetail {
                     .gap_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(if self.source.request.kind.is_search() {
-                        "Results"
-                    } else {
-                        "Output"
-                    })
+                    .child(self.source.request.kind.heading())
                     .when_some(self.exit_code, |header, code| {
                         header.child(format!("Exit {code}"))
                     })
@@ -203,6 +199,9 @@ impl Render for ToolDetail {
                                     } else {
                                         "No results.".into()
                                     }
+                                } else if self.source.request.kind == tool_detail::Kind::FileChange
+                                {
+                                    "No file details.".into()
                                 } else {
                                     "No output.".into()
                                 }

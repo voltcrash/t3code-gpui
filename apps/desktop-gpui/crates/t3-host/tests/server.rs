@@ -1050,9 +1050,32 @@ async fn verifies_tool_detail(client: &RpcClient, http: &reqwest::Client, base: 
     else {
         panic!("expected snapshot");
     };
-    assert_eq!(projection.visible_turn_items.len(), 10);
+    assert_eq!(projection.visible_turn_items.len(), 12);
     for row in &projection.visible_turn_items {
         let source = t3_client::tool_detail::source(row).unwrap();
+        if source.request.kind == t3_client::tool_detail::Kind::FileChange {
+            assert!(!source.omitted, "file metadata is already in the stream");
+            assert!(row.item.str("oldStr").is_none());
+            assert!(row.item.str("newStr").is_none());
+            match row.item.id.as_str() {
+                "changed-files" => {
+                    assert!(
+                        row.item.str("diffStr").is_none(),
+                        "successful patch payloads stay omitted"
+                    );
+                    assert_eq!(
+                        source.output.as_deref(),
+                        Some("update src/café.rs\nrename old.rs → new.rs\n\nLines: +3 -1")
+                    );
+                }
+                "failed-edit" => assert_eq!(
+                    source.output.as_deref(),
+                    Some("example.rs\n\nAttempted patch\n@@ -1 +1 @@\n-old\n+new")
+                ),
+                _ => panic!("unexpected file change"),
+            }
+            continue;
+        }
         if source.request.kind.is_search() {
             assert!(!source.omitted, "search results are already in the stream");
             match row.item.id.as_str() {
