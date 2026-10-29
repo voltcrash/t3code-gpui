@@ -1,5 +1,7 @@
 //! The window's root: sidebar beside the open thread or a new-thread draft.
 
+use std::collections::HashMap;
+
 use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::command::CommandState;
@@ -11,6 +13,7 @@ use gpui_kit::*;
 use t3_client::shell::timestamp_ms;
 
 use crate::appearance::{SIDEBAR_WIDTH, TOPBAR_HEIGHT};
+use crate::attachment_draft::AttachmentDraft;
 use crate::changes::{self, Changes};
 use crate::desktop::{
     self, About, CloseWindow, Maximize, Minimize, OpenSettings, PasteAsText, ResetZoom,
@@ -117,6 +120,7 @@ pub struct Workspace {
     sidebar_focus: FocusHandle,
     actions: Entity<ThreadActions>,
     thread: Option<Entity<ThreadView>>,
+    attachment_drafts: HashMap<SharedString, Entity<AttachmentDraft>>,
     draft: Option<(Entity<DraftView>, Subscription)>,
     project_picker: Option<(Entity<ProjectPicker>, Subscription)>,
     pending_project: Option<String>,
@@ -358,6 +362,7 @@ impl Workspace {
             sidebar_focus: cx.focus_handle(),
             actions,
             thread: None,
+            attachment_drafts: HashMap::new(),
             draft: None,
             project_picker: None,
             pending_project: None,
@@ -551,9 +556,16 @@ impl Workspace {
         }
         let current = self.thread.as_ref().map(|view| view.read(cx).thread_id());
         if selected.as_ref() != current {
-            self.thread = selected
-                .clone()
-                .map(|id| cx.new(|cx| ThreadView::new(self.env.clone(), id, window, cx)));
+            self.attachment_drafts
+                .retain(|_, draft| draft.read(cx).retain_on_navigation());
+            self.thread = selected.clone().map(|id| {
+                let attachments = self
+                    .attachment_drafts
+                    .entry(id.clone())
+                    .or_insert_with(|| cx.new(|_| AttachmentDraft::new(self.env.clone())))
+                    .clone();
+                cx.new(|cx| ThreadView::new(self.env.clone(), id, attachments, window, cx))
+            });
             if let (Some(thread), Some((panel, _))) = (&self.thread, &self.changes) {
                 self.changes_return_focus = window.focused(cx);
                 panel.update(cx, |panel, cx| panel.set_thread(thread.clone(), window, cx));

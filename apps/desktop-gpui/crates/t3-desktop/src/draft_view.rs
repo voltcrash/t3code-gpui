@@ -8,6 +8,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use t3_client::providers::{self, NewThreadDefaults, ProjectDefaults};
 
+use crate::attachment_draft::AttachmentDraft;
 use crate::composer::{Composer, ComposerEvent, NewThread, Target};
 use crate::environment::LocalEnvironment;
 
@@ -39,7 +40,9 @@ impl DraftView {
             defaults: None,
             loaded: false,
         });
-        let composer = cx.new(|cx| Composer::new(env.clone(), target, None, window, cx));
+        let attachments = cx.new(|_| AttachmentDraft::new(env.clone()));
+        let composer =
+            cx.new(|cx| Composer::new(env.clone(), target, None, attachments, window, cx));
         composer.update(cx, |composer, cx| composer.focus(window, cx));
         let subscriptions = vec![
             cx.subscribe(&composer, |_, _, event: &ComposerEvent, cx| match event {

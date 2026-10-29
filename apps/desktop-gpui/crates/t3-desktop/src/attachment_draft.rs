@@ -74,6 +74,10 @@ impl AttachmentDraft {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+    pub fn retain_on_navigation(&self) -> bool {
+        // A picker can return after navigation, before any item exists.
+        !self.items.is_empty() || self.picking.is_some()
+    }
     pub fn ready(&self) -> Option<Vec<Arc<Pending>>> {
         self.items.iter().map(|item| item.pending.clone()).collect()
     }
