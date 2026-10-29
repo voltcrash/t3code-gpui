@@ -264,6 +264,49 @@ impl Sidebar {
         cx.notify();
     }
 
+    pub fn navigate(
+        &mut self,
+        destination: t3_client::navigation::Destination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Search replaces the rendered list, but desktop jumps still follow
+        // the sidebar's thread order, just as they do in the web client.
+        self.rebuild_thread_rows(cx);
+        let ids: Vec<_> = self
+            .rows
+            .iter()
+            .take_while(|row| {
+                !matches!(
+                    row,
+                    Row::Shelf {
+                        shelf: Shelf::Archived,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|row| match row {
+                Row::Thread(thread) => Some(thread.id.clone()),
+                _ => None,
+            })
+            .collect();
+        let Some(index) = t3_client::navigation::target(&ids, self.selected.as_ref(), destination)
+        else {
+            return;
+        };
+        let id = ids[index].clone();
+        self.clear_search(window, cx);
+        self.select(id.clone(), cx);
+        self.rebuild_thread_rows(cx);
+        if let Some(row) = self
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Thread(thread) if thread.id == id))
+        {
+            self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
     /// Drops the selection without announcing it, for a draft taking the pane.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
@@ -285,10 +328,10 @@ impl Sidebar {
     }
 
     fn rebuild_rows(&mut self, cx: &App) {
-        let now = now_ms();
-        let env = self.env.read(cx);
-        let sections = sidebar_sections(&env.shell, env.capabilities, now);
         if !self.search.query.is_empty() {
+            let now = now_ms();
+            let env = self.env.read(cx);
+            let sections = sidebar_sections(&env.shell, env.capabilities, now);
             let rows: Vec<_> = self
                 .search
                 .results(
@@ -338,6 +381,13 @@ impl Sidebar {
             self.search_rows = rows;
             return;
         }
+        self.rebuild_thread_rows(cx);
+    }
+
+    fn rebuild_thread_rows(&mut self, cx: &App) {
+        let now = now_ms();
+        let env = self.env.read(cx);
+        let sections = sidebar_sections(&env.shell, env.capabilities, now);
         let selected = self.selected.as_deref();
         let row =
             |thread: &ThreadShell, settled: bool| Row::Thread(thread_row(thread, settled, now));
