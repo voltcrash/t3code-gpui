@@ -16,12 +16,17 @@ pub struct State {
 }
 
 impl State {
-    pub fn delay(&self, thread: &ThreadShell, now: Duration) -> Option<Duration> {
+    pub fn delay(&mut self, thread: &ThreadShell, now: Duration) -> Option<Duration> {
         let updated = timestamp_ms(Some(&thread.updated_at))?;
         let visited = timestamp_ms(thread.last_visited_at.as_deref());
-        if visited.is_some_and(|visited| visited >= updated)
-            || self.dispatched.as_deref() == Some(&thread.updated_at)
-        {
+        if visited.is_some_and(|visited| visited >= updated) {
+            // The conversation may already be read on entry. Remember that
+            // watermark too, so a manual unread rewind stays sticky until
+            // new activity arrives or the conversation is reopened.
+            self.dispatched = Some(thread.updated_at.clone());
+            return None;
+        }
+        if self.dispatched.as_deref() == Some(&thread.updated_at) {
             return None;
         }
         let unseen_completion = timestamp_ms(thread.latest_run_completed_at())
@@ -102,6 +107,30 @@ mod tests {
         );
         assert_eq!(
             state.delay(&completed, Duration::from_secs(2)),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn marking_an_already_read_open_thread_unread_is_sticky_until_new_activity() {
+        let updated = "2026-01-01T12:00:00Z";
+        let mut state = State::default();
+        assert_eq!(
+            state.delay(&thread(updated, Some(updated), None), Duration::ZERO),
+            None
+        );
+        assert_eq!(
+            state.delay(
+                &thread(updated, Some("2026-01-01T11:00:00Z"), None),
+                Duration::from_secs(20)
+            ),
+            None
+        );
+        assert_eq!(
+            state.delay(
+                &thread("2026-01-01T12:01:00Z", Some("2026-01-01T11:00:00Z"), None),
+                Duration::from_secs(20)
+            ),
             Some(Duration::ZERO)
         );
     }
