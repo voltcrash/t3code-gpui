@@ -6478,6 +6478,7 @@ dependencies = [
  "serde_json",
  "t3-client",
  "t3-host",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
