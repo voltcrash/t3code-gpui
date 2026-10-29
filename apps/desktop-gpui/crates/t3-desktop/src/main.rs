@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let launch = launch::development()?;
+    let launch = launch::resolve()?;
     let preference_store = t3_host::preferences::Store::new(&launch.t3_home);
     let loaded_preferences = preference_store.load();
     let runtime = tokio::runtime::Builder::new_multi_thread()

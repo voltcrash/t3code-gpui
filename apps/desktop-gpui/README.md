@@ -31,8 +31,27 @@ cargo run -p t3-desktop
 cargo test
 ```
 
-The app keeps its data in the checkout's `.t3`, like `vp run dev`, so it never touches `~/.t3`.
-`vp run migrate-dev-db` seeds that directory with a copy of real data. Set `T3_DESKTOP_HOME` to use
-another directory and `T3_NODE` to pick a Node runtime that is not first on `PATH`.
+Development keeps its data in the checkout's `.t3`, like `vp run dev`, and ignores an ambient
+`T3CODE_HOME`. `vp run migrate-dev-db` seeds that directory with a copy of real data.
+`T3_DESKTOP_HOME` overrides the data directory in either mode; `T3_NODE` selects another Node runtime.
+An explicit `T3_REPO_ROOT` runs that checkout's server sources, including from a release binary.
+
+## Bundled runtime
+
+Installed builds resolve resources beside the executable on Linux and Windows, or from
+`Contents/Resources` in a macOS app bundle:
+
+```text
+resources/
+  node/bin/node                  # node/node.exe on Windows
+  server/apps/server/dist/bin.mjs
+  server/node_modules/...
+```
+
+The server tree must include its production dependencies for the target platform and bundled Node
+runtime. Installed builds use the existing desktop's T3 home (`~/.t3`, or `T3CODE_HOME`) and start the
+server in the user's home, outside the resource directory. Release binaries require a bundle unless
+`T3_REPO_ROOT` is explicit; missing resources fail rather than falling back to a build-machine path.
+This runtime resolver does not generate installers.
 
 The `t3-host` integration test also starts the real server, with its data under `target/`.
