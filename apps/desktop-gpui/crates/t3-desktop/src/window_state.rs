@@ -7,6 +7,7 @@ struct WindowState {
     store: Store,
     saved: Option<Placement>,
     current: Option<Placement>,
+    #[cfg(target_os = "linux")]
     requested: Option<Placement>,
     dirty: bool,
 }
@@ -25,6 +26,7 @@ pub fn init(home: &std::path::Path, cx: &mut App) {
         store,
         saved,
         current: None,
+        #[cfg(target_os = "linux")]
         requested: None,
         dirty: false,
     });
@@ -63,7 +65,10 @@ pub fn initial(cx: &mut App) -> WindowBounds {
     });
     let model = cx.global_mut::<WindowState>();
     model.current = Some(state);
-    model.requested = Some(state);
+    #[cfg(target_os = "linux")]
+    {
+        model.requested = Some(state);
+    }
     let bounds = Bounds {
         origin: point(px(state.bounds.x), px(state.bounds.y)),
         size: size(px(state.bounds.width), px(state.bounds.height)),
