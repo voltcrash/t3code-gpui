@@ -92,6 +92,22 @@ impl ThreadActions {
         cx.notify();
     }
 
+    pub fn shortcut(
+        &mut self,
+        thread_id: String,
+        shortcut: t3_client::thread_actions::Shortcut,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let env = self.env.read(cx);
+        let Some(thread) = env.thread(&thread_id) else {
+            return;
+        };
+        if let Some(action) = shortcut.action(thread, env.thread_actions) {
+            self.request(thread_id, action, window, cx);
+        }
+    }
+
     fn request(
         &mut self,
         thread_id: String,

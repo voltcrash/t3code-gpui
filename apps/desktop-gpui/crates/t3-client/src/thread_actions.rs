@@ -71,6 +71,28 @@ impl Action {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum Shortcut {
+    TogglePin,
+    ToggleSettlement,
+}
+
+impl Shortcut {
+    pub fn action(self, thread: &ThreadShell, capabilities: Capabilities) -> Option<Action> {
+        menu_actions(thread, capabilities)
+            .into_iter()
+            .find(|(action, enabled)| {
+                *enabled
+                    && matches!(
+                        (self, action),
+                        (Self::TogglePin, Action::Pin | Action::Unpin)
+                            | (Self::ToggleSettlement, Action::Settle | Action::Unsettle)
+                    )
+            })
+            .map(|(action, _)| action)
+    }
+}
+
 pub fn menu_actions(thread: &ThreadShell, capabilities: Capabilities) -> Vec<(Action, bool)> {
     let mut actions = vec![(Action::Rename(thread.title.clone()), true)];
     if thread.archived_at.is_some() {
@@ -152,6 +174,49 @@ mod tests {
                 .iter()
                 .any(|(action, _)| matches!(action, Action::Pin | Action::Settle))
         );
+    }
+
+    #[test]
+    fn shortcuts_toggle_the_committed_state_and_respect_available_actions() {
+        let caps = Capabilities {
+            pinning: true,
+            settlement: true,
+        };
+        let active = thread(json!({}));
+        assert_eq!(Shortcut::TogglePin.action(&active, caps), Some(Action::Pin));
+        assert_eq!(
+            Shortcut::ToggleSettlement.action(&active, caps),
+            Some(Action::Settle)
+        );
+        let organized =
+            thread(json!({"pinnedAt":"2026-01-01T00:00:00Z", "settledOverride":"settled"}));
+        assert_eq!(
+            Shortcut::TogglePin.action(&organized, caps),
+            Some(Action::Unpin)
+        );
+        assert_eq!(
+            Shortcut::ToggleSettlement.action(&organized, caps),
+            Some(Action::Unsettle)
+        );
+        for shortcut in [Shortcut::TogglePin, Shortcut::ToggleSettlement] {
+            assert_eq!(shortcut.action(&active, Capabilities::default()), None);
+            assert_eq!(
+                shortcut.action(&thread(json!({"archivedAt":"2026-01-01T00:00:00Z"})), caps),
+                None
+            );
+        }
+        let pin = Shortcut::TogglePin
+            .action(&active, caps)
+            .unwrap()
+            .command(&active.id);
+        assert_eq!(pin["type"], "thread.pin");
+        assert_eq!(pin["threadId"], active.id);
+        let unsettle = Shortcut::ToggleSettlement
+            .action(&organized, caps)
+            .unwrap()
+            .command(&organized.id);
+        assert_eq!(unsettle["type"], "thread.unsettle");
+        assert_eq!(unsettle["reason"], "user");
     }
 
     #[test]
