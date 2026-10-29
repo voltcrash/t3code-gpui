@@ -33,7 +33,9 @@ actions!(
         FindInThread,
         ToggleChanges,
         TogglePlanMode,
-        ToggleSidebar
+        ToggleSidebar,
+        ToggleThreadPin,
+        ToggleThreadSettlement
     ]
 );
 
@@ -43,6 +45,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-p", ToggleThreadPin, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-s", ToggleThreadSettlement, Some(CONTEXT)),
         KeyBinding::new("secondary-b", ToggleSidebar, Some(CONTEXT)),
         KeyBinding::new("secondary-d", ToggleChanges, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-a", TogglePlanMode, Some(CONTEXT)),
@@ -77,6 +81,26 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn thread_shortcut(
+        &mut self,
+        shortcut: t3_client::thread_actions::Shortcut,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        let Some(thread) = &self.thread else {
+            return;
+        };
+        let id = thread.read(cx).thread_id().to_string();
+        self.actions
+            .update(cx, |actions, cx| actions.shortcut(id, shortcut, window, cx));
+    }
+
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
@@ -729,6 +753,16 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .relative()
             .key_context(CONTEXT)
+            .on_action(cx.listener(|this, _: &ToggleThreadPin, window, cx| {
+                this.thread_shortcut(t3_client::thread_actions::Shortcut::TogglePin, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleThreadSettlement, window, cx| {
+                this.thread_shortcut(
+                    t3_client::thread_actions::Shortcut::ToggleSettlement,
+                    window,
+                    cx,
+                )
+            }))
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
