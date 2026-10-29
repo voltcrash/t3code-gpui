@@ -617,26 +617,31 @@ fn render_row(
                     .text_color(crate::appearance::palette(cx).color("messageForeground"))
                     .text_sm()
                     .whitespace_normal()
-                    .child(StyledText::new(row.text.clone()).with_highlights(
-                        active.into_iter().flat_map(|active| {
-                            t3_client::find::ranges(&row.text, &active.query)
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, range)| {
-                                    (
-                                        range,
-                                        HighlightStyle {
-                                            background_color: Some(
-                                                crate::thread_find::highlight_color(
-                                                    index == active.selected.occurrence,
+                    .child(if active.is_none() {
+                        SelectableText::new(id.clone(), row.text.clone()).into_any_element()
+                    } else {
+                        // SelectableText has no range-highlighting API.
+                        StyledText::new(row.text.clone())
+                            .with_highlights(active.into_iter().flat_map(|active| {
+                                t3_client::find::ranges(&row.text, &active.query)
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, range)| {
+                                        (
+                                            range,
+                                            HighlightStyle {
+                                                background_color: Some(
+                                                    crate::thread_find::highlight_color(
+                                                        index == active.selected.occurrence,
+                                                    ),
                                                 ),
-                                            ),
-                                            ..Default::default()
-                                        },
-                                    )
-                                })
-                        }),
-                    )),
+                                                ..Default::default()
+                                            },
+                                        )
+                                    })
+                            }))
+                            .into_any_element()
+                    }),
             )
             .into_any_element(),
         TimelineContent::Message {
