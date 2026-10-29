@@ -65,6 +65,10 @@ impl DraftView {
         &self.project_id
     }
 
+    pub fn can_toggle_plan_mode(&self, cx: &App) -> bool {
+        self.composer.read(cx).can_toggle_plan_mode(cx)
+    }
+
     pub fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.composer
             .update(cx, |composer, cx| composer.toggle_plan_mode(window, cx))

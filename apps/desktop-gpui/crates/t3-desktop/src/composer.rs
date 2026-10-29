@@ -296,8 +296,12 @@ impl Composer {
         .then_some(mode)
     }
 
+    pub fn can_toggle_plan_mode(&self, cx: &App) -> bool {
+        !self.busy && self.plan_mode_enabled(cx)
+    }
+
     pub fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.busy || !self.plan_mode_enabled(cx) {
+        if !self.can_toggle_plan_mode(cx) {
             return false;
         }
         self.picked_interaction_mode = Some(
