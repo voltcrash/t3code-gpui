@@ -637,8 +637,8 @@ impl Sidebar {
                     )
                     .child(thread_actions::button(&self.actions, &thread.id))
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .context_menu(move |menu, _, cx| {
-                        thread_actions::menu(menu, &actions, &menu_id, cx)
+                    .context_menu(move |menu, window, cx| {
+                        thread_actions::menu(menu, &actions, &menu_id, window, cx)
                     })
                     .into_any_element()
             }

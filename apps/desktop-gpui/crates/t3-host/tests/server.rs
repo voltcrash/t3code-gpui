@@ -115,6 +115,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     verifies_checkpoint_review(&client, &checkpoint_workspace).await;
     verifies_attachments(&client, &http, backend.http_base(), &home).await;
     verifies_planning(&client).await;
+    verifies_read_state(&client).await;
     verifies_tasks(&client).await;
     verifies_sidebar_search(&client).await;
     verifies_tool_detail(&client, &http, backend.http_base()).await;
@@ -305,6 +306,40 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     backend.shutdown(Duration::from_secs(10)).await;
     assert!(!client.closed().await.is_empty());
     let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_read_state(client: &RpcClient) {
+    let id = "planning-fixture";
+    let mut updates =
+        client.subscribe::<_, ShellStreamItem>(t3_client::shell::SUBSCRIBE, &json!({}));
+    let mut shell = ShellState::default();
+    shell.apply(updates.next().await.unwrap().unwrap());
+    let visited_at = shell.threads[id].updated_at.clone();
+    t3_client::commands::dispatch(client, &t3_client::visits::command(id, &visited_at))
+        .await
+        .unwrap();
+    while shell.threads[id].last_visited_at.as_deref() != Some(&visited_at) {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    t3_client::commands::dispatch(
+        client,
+        &t3_client::thread_actions::Action::MarkUnread.command(id),
+    )
+    .await
+    .unwrap();
+    while !shell.threads[id].has_unseen_completion() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert_eq!(
+        shell.threads[id].updated_at, visited_at,
+        "read state must not create thread activity"
+    );
+    t3_client::commands::dispatch(client, &t3_client::visits::command(id, &visited_at))
+        .await
+        .unwrap();
+    while shell.threads[id].has_unseen_completion() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
 }
 
 async fn verifies_sidebar_search(client: &RpcClient) {
@@ -1005,6 +1040,8 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
         Action::Unpin,
         Action::Settle,
         Action::Unsettle,
+        Action::Snooze("2099-01-01T09:00:00Z".into()),
+        Action::Unsnooze,
         Action::Archive,
         Action::Rename("Renamed archived thread".into()),
         Action::Restore,
@@ -1031,6 +1068,11 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
                     .is_some_and(|thread| thread.settled_override.as_deref() == Some("settled")),
                 Action::Unsettle => active
                     .is_some_and(|thread| thread.settled_override.as_deref() == Some("active")),
+                Action::Snooze(until) => active.is_some_and(|thread| {
+                    t3_client::shell::timestamp_ms(thread.snoozed_until.as_deref())
+                        == t3_client::shell::timestamp_ms(Some(until))
+                }),
+                Action::Unsnooze => active.is_some_and(|thread| thread.snoozed_until.is_none()),
                 Action::MarkUnread => active
                     .or(archived)
                     .is_some_and(|thread| thread.has_unseen_completion()),

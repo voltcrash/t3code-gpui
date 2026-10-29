@@ -20,6 +20,7 @@ pub mod requests;
 pub mod review;
 pub mod rpc;
 pub mod shell;
+pub mod snooze;
 pub mod tasks;
 pub mod thread;
 pub mod thread_actions;

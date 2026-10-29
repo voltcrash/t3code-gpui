@@ -25,6 +25,7 @@ pub struct ThreadActions {
     env: Entity<LocalEnvironment>,
     busy: HashSet<String>,
     dialog: Option<Dialog>,
+    custom: Option<(Entity<crate::custom_snooze::CustomSnooze>, Subscription)>,
     input: Entity<InputState>,
     focus: FocusHandle,
     return_focus: FocusHandle,
@@ -60,6 +61,7 @@ impl ThreadActions {
             env,
             busy: HashSet::new(),
             dialog: None,
+            custom: None,
             input,
             focus: cx.focus_handle(),
             return_focus,
@@ -70,7 +72,7 @@ impl ThreadActions {
     }
 
     pub fn has_dialog(&self) -> bool {
-        self.dialog.is_some()
+        self.dialog.is_some() || self.custom.is_some()
     }
 
     pub fn dismiss_error(&mut self, cx: &mut Context<Self>) {
@@ -86,7 +88,15 @@ impl ThreadActions {
         {
             return;
         }
+        if self
+            .custom
+            .as_ref()
+            .is_some_and(|(dialog, _)| self.busy.contains(&dialog.read(cx).thread_id))
+        {
+            return;
+        }
         self.dialog = None;
+        self.custom = None;
         self.error = None;
         self.return_focus.focus(window, cx);
         cx.notify();
@@ -115,13 +125,34 @@ impl ThreadActions {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.contains(&thread_id) || self.dialog.is_some() {
+        if self.busy.contains(&thread_id) || self.has_dialog() {
             return;
         }
         let env = self.env.read(cx);
         let Some(thread) = env.thread(&thread_id) else {
             return;
         };
+        if matches!(&action, Action::Snooze(until) if until.is_empty()) {
+            let title = thread.title.clone();
+            let dialog = cx.new(|cx| {
+                crate::custom_snooze::CustomSnooze::new(thread_id.clone(), title, window, cx)
+            });
+            let subscription = cx.subscribe_in(
+                &dialog,
+                window,
+                |this, dialog, event: &crate::custom_snooze::Event, window, cx| match event {
+                    crate::custom_snooze::Event::Closed => this.close(window, cx),
+                    crate::custom_snooze::Event::Submitted(until) => {
+                        let thread_id = dialog.read(cx).thread_id.clone();
+                        this.perform(thread_id, Action::Snooze(until.clone()), window, cx);
+                    }
+                },
+            );
+            self.custom = Some((dialog, subscription));
+            self.error = None;
+            cx.notify();
+            return;
+        }
         let preferences = crate::preferences::global(cx);
         let preferences = &preferences.read(cx).value;
         let confirm = match action {
@@ -168,6 +199,15 @@ impl ThreadActions {
         self.perform(dialog.thread_id.clone(), action, window, cx);
     }
 
+    fn fail(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let message = message.into();
+        if let Some((dialog, _)) = &self.custom {
+            dialog.update(cx, |dialog, cx| dialog.failed(message.clone(), cx));
+        }
+        self.error = Some(message);
+        cx.notify();
+    }
+
     fn perform(
         &mut self,
         thread_id: String,
@@ -180,8 +220,7 @@ impl ThreadActions {
         }
         let env = self.env.read(cx);
         let Some(rpc) = env.rpc.clone() else {
-            self.error = Some("Environment unavailable".into());
-            cx.notify();
+            self.fail("Environment unavailable", cx);
             return;
         };
         let Some(thread) = env.thread(&thread_id) else {
@@ -195,11 +234,23 @@ impl ThreadActions {
                     *enabled && std::mem::discriminant(candidate) == std::mem::discriminant(&action)
                 });
         if !allowed {
-            self.error = Some("This action is no longer available for this thread.".into());
-            cx.notify();
+            self.fail("This action is no longer available for this thread.", cx);
             return;
         }
+        if let Action::Snooze(until) = &action {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            if !t3_client::snooze::valid_until(until, now_ms) {
+                self.fail("Choose a snooze time in the future.", cx);
+                return;
+            }
+        }
         self.busy.insert(thread_id.clone());
+        if let Some((dialog, _)) = &self.custom {
+            dialog.update(cx, |dialog, cx| dialog.set_busy(true, cx));
+        }
         self.error = None;
         let command = action.command(&thread_id);
         let operation = tokio_bridge::spawn(cx, async move {
@@ -218,12 +269,16 @@ impl ThreadActions {
                             .dialog
                             .as_ref()
                             .is_some_and(|dialog| dialog.thread_id == thread_id)
+                            || this
+                                .custom
+                                .as_ref()
+                                .is_some_and(|(dialog, _)| dialog.read(cx).thread_id == thread_id)
                         {
                             this.close(window, cx);
                         }
                     }
                     Err(error) => {
-                        this.error = Some(format!("{} failed: {error}", action.label()).into());
+                        this.fail(format!("{} failed: {error}", action.label()), cx);
                     }
                 }
                 cx.notify();
@@ -238,6 +293,7 @@ pub fn menu(
     mut menu: PopupMenu,
     actions: &Entity<ThreadActions>,
     thread_id: &str,
+    window: &mut Window,
     cx: &mut App,
 ) -> PopupMenu {
     let state = actions.read(cx);
@@ -245,7 +301,7 @@ pub fn menu(
     let Some(thread) = env.thread(thread_id) else {
         return menu;
     };
-    let disabled = env.rpc.is_none() || state.busy.contains(thread_id) || state.dialog.is_some();
+    let disabled = env.rpc.is_none() || state.busy.contains(thread_id) || state.has_dialog();
     let copy_id = thread.id.clone();
     menu = menu.item(
         PopupMenuItem::new("Copy thread ID").on_click(move |_, _, cx| {
@@ -255,6 +311,49 @@ pub fn menu(
     for (action, enabled) in menu_actions(thread, env.thread_actions) {
         let target = actions.downgrade();
         let id = thread_id.to_owned();
+        if matches!(action, Action::Snooze(_)) {
+            let presets = match t3_client::snooze::current_presets() {
+                Ok(presets) => presets,
+                Err(error) => {
+                    tracing::warn!(%error, "snooze presets failed");
+                    menu = menu.item(PopupMenuItem::new("Snooze").disabled(true));
+                    continue;
+                }
+            };
+            let submenu = PopupMenu::build(window, cx, |mut submenu, _, _| {
+                for preset in presets {
+                    let target = target.clone();
+                    let id = id.clone();
+                    let until = preset.wake.timestamp().to_string();
+                    let label = format!(
+                        "{} ({:02}:{:02})",
+                        preset.label,
+                        preset.wake.hour(),
+                        preset.wake.minute()
+                    );
+                    submenu =
+                        submenu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                            let _ = target.update(cx, |state, cx| {
+                                state.request(id.clone(), Action::Snooze(until.clone()), window, cx)
+                            });
+                        }));
+                }
+                let target = target.clone();
+                let id = id.clone();
+                submenu
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Custom…").on_click(move |_, window, cx| {
+                            let _ = target.update(cx, |state, cx| {
+                                state.request(id.clone(), Action::Snooze(String::new()), window, cx)
+                            });
+                        }),
+                    )
+            });
+            menu =
+                menu.item(PopupMenuItem::submenu("Snooze", submenu).disabled(disabled || !enabled));
+            continue;
+        }
         menu = menu.item(
             PopupMenuItem::new(action.label())
                 .disabled(disabled || !enabled)
@@ -277,12 +376,15 @@ pub fn button(actions: &Entity<ThreadActions>, thread_id: &str) -> AnyElement {
         .icon(Icon::new(Lucide::Ellipsis))
         .ghost()
         .xsmall()
-        .dropdown_menu(move |popup, _, cx| menu(popup, &actions, &id, cx))
+        .dropdown_menu(move |popup, window, cx| menu(popup, &actions, &id, window, cx))
         .into_any_element()
 }
 
 impl Render for ThreadActions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((dialog, _)) = &self.custom {
+            return dialog.clone().into_any_element();
+        }
         let Some(dialog) = &self.dialog else {
             return div().into_any_element();
         };

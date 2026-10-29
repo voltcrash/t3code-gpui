@@ -5,6 +5,7 @@ mod attachment_image;
 mod attachment_view;
 mod changes;
 mod composer;
+mod custom_snooze;
 mod desktop;
 mod draft_view;
 mod environment;
