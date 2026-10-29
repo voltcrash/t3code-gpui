@@ -11,6 +11,7 @@ pub struct Capabilities {
     pub pinning: bool,
     pub settlement: bool,
     pub visited_tracking: bool,
+    pub snooze: bool,
 }
 
 impl Capabilities {
@@ -20,6 +21,7 @@ impl Capabilities {
             pinning: capabilities["threadPinning"] == true,
             settlement: capabilities["threadSettlement"] == true,
             visited_tracking: capabilities["threadVisitedTracking"] == true,
+            snooze: capabilities["threadSnooze"] == true,
         }
     }
 }
@@ -34,6 +36,8 @@ pub enum Action {
     Archive,
     Restore,
     MarkUnread,
+    Snooze(String),
+    Unsnooze,
     Delete,
 }
 
@@ -48,6 +52,8 @@ impl Action {
             Self::Archive => "Archive thread",
             Self::Restore => "Restore thread",
             Self::MarkUnread => "Mark unread",
+            Self::Snooze(_) => "Snooze",
+            Self::Unsnooze => "Wake thread",
             Self::Delete => "Delete thread",
         }
     }
@@ -62,6 +68,8 @@ impl Action {
             Self::Archive => "thread.archive",
             Self::Restore => "thread.unarchive",
             Self::MarkUnread => "thread.mark-unread",
+            Self::Snooze(_) => "thread.snooze",
+            Self::Unsnooze => "thread.unsnooze",
             Self::Delete => "thread.delete",
         };
         let mut command = json!({
@@ -69,7 +77,8 @@ impl Action {
         });
         match self {
             Self::Rename(title) => command["title"] = title.trim().into(),
-            Self::Unsettle => command["reason"] = "user".into(),
+            Self::Unsettle | Self::Unsnooze => command["reason"] = "user".into(),
+            Self::Snooze(until) => command["snoozedUntil"] = until.as_str().into(),
             _ => {}
         }
         command
@@ -99,6 +108,18 @@ impl Shortcut {
 }
 
 pub fn menu_actions(thread: &ThreadShell, capabilities: Capabilities) -> Vec<(Action, bool)> {
+    menu_actions_at(
+        thread,
+        capabilities,
+        jiff::Timestamp::now().as_millisecond(),
+    )
+}
+
+pub fn menu_actions_at(
+    thread: &ThreadShell,
+    capabilities: Capabilities,
+    now_ms: i64,
+) -> Vec<(Action, bool)> {
     let mut actions = vec![(Action::Rename(thread.title.clone()), true)];
     if thread.archived_at.is_some() {
         actions.push((Action::Restore, true));
@@ -122,6 +143,16 @@ pub fn menu_actions(thread: &ThreadShell, capabilities: Capabilities) -> Vec<(Ac
                 },
                 true,
             ));
+        }
+        if capabilities.snooze {
+            if thread.is_snoozed(now_ms) {
+                actions.push((Action::Unsnooze, true));
+            } else {
+                actions.push((
+                    Action::Snooze(String::new()),
+                    crate::snooze::can_snooze(thread, now_ms),
+                ));
+            }
         }
         // `threadRuntimeCanArchive`: queued work without an attached run can
         // be archived; preparing, starting and running work cannot.
@@ -255,6 +286,53 @@ mod tests {
             assert_eq!(command["threadId"], thread.id);
             assert!(command.get("visitedAt").is_none());
         }
+    }
+
+    #[test]
+    fn snooze_actions_follow_time_capabilities_and_pending_requests() {
+        let now = "2026-01-01T12:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_millisecond();
+        let until = "2026-01-02T09:00:00Z";
+        let caps = Capabilities::from_config(
+            &json!({"environment":{"capabilities":{"threadSnooze":true}}}),
+        );
+        let snooze = Action::Snooze(String::new());
+        assert!(menu_actions_at(&thread(json!({})), caps, now).contains(&(snooze.clone(), true)));
+        assert!(
+            menu_actions_at(
+                &thread(json!({"pendingRuntimeRequest":{"kind":"user_input", "blocking":false}})),
+                caps,
+                now
+            )
+            .contains(&(snooze.clone(), false))
+        );
+        let sleeping = thread(json!({"snoozedUntil":until}));
+        let actions = menu_actions_at(&sleeping, caps, now);
+        assert!(actions.contains(&(Action::Unsnooze, true)));
+        assert!(
+            !actions
+                .iter()
+                .any(|(action, _)| matches!(action, Action::Snooze(_)))
+        );
+        assert!(menu_actions_at(&sleeping, caps, now + 2 * 86_400_000).contains(&(snooze, true)));
+        for patch in [json!({}), json!({"archivedAt":"2026-01-01T00:00:00Z"})] {
+            assert!(
+                !menu_actions_at(&thread(patch), Capabilities::default(), now)
+                    .iter()
+                    .any(|(action, _)| matches!(action, Action::Snooze(_) | Action::Unsnooze))
+            );
+        }
+        let snooze = Action::Snooze(until.into()).command("thread-1");
+        assert_eq!(snooze["type"], "thread.snooze");
+        assert_eq!(snooze["snoozedUntil"], until);
+        let wake = Action::Unsnooze.command("thread-1");
+        assert_eq!(wake["type"], "thread.unsnooze");
+        assert_eq!(wake["reason"], "user");
+        assert!(crate::snooze::valid_until(until, now));
+        assert!(!crate::snooze::valid_until(until, now + 2 * 86_400_000));
+        assert!(!crate::snooze::valid_until("invalid", now));
     }
 
     #[test]
