@@ -78,6 +78,7 @@ pub fn init(launch: BackendLaunch, cx: &mut App) {
     // macOS uses the system menu bar installed above.
     GlobalState::global_mut(cx).set_app_menus(menus().into_iter().map(Menu::owned).collect());
     cx.on_window_closed(|cx, id| {
+        crate::window_state::save(cx);
         let desktop = cx.global_mut::<Desktop>();
         if desktop
             .window
@@ -112,12 +113,14 @@ pub fn activate(cx: &mut App) {
             title: Some("T3 Code".into()),
             ..Default::default()
         }),
-        window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
+        window_bounds: Some(crate::window_state::initial(cx)),
         window_min_size: Some(size(px(640.), px(420.))),
         app_id: Some("t3code".into()),
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
+        #[cfg(target_os = "linux")]
+        window.on_next_frame(|window, cx| crate::window_state::restore_position(window, cx));
         let appearance = crate::preferences::global(cx).read(cx).value.appearance;
         crate::preferences::apply_appearance(appearance, Some(window), cx);
         let workspace = cx.new(|cx| Workspace::new(env, window, cx));

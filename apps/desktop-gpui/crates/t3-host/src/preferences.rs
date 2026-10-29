@@ -76,33 +76,37 @@ impl Store {
     }
 
     pub fn save(&self, preferences: &Preferences) -> io::Result<()> {
-        let parent = self.path.parent().expect("preference file has a parent");
-        fs::create_dir_all(parent)?;
-        let temporary = parent.join(format!(".gpui-client-settings-{}.tmp", nonce()?));
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary)?;
-            let bytes = serde_json::to_vec_pretty(preferences).map_err(io::Error::other)?;
-            file.write_all(&bytes)?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, &self.path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        save_json(&self.path, preferences)
     }
 }
 
-fn nonce() -> io::Result<String> {
+pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let parent = path.parent().expect("preference file has a parent");
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".gpui-client-settings-{}.tmp", nonce()?));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub(crate) fn nonce() -> io::Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
