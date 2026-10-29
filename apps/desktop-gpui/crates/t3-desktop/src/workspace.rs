@@ -90,6 +90,7 @@ pub struct Workspace {
     menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
     sidebar: Entity<Sidebar>,
+    visit: Entity<crate::thread_visit::ThreadVisit>,
     sidebar_visible: bool,
     sidebar_focus: FocusHandle,
     actions: Entity<ThreadActions>,
@@ -224,6 +225,7 @@ impl Workspace {
         let focus = cx.focus_handle();
         let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), window, cx));
+        let visit = cx.new(|cx| crate::thread_visit::ThreadVisit::new(env.clone(), window, cx));
         let subscriptions = vec![
             cx.observe_window_activation(window, |_, window, cx| {
                 if window.is_window_active() {
@@ -281,6 +283,7 @@ impl Workspace {
             menu: AppMenuBar::new(cx),
             env,
             sidebar,
+            visit,
             sidebar_visible: true,
             sidebar_focus: cx.focus_handle(),
             actions,
@@ -781,6 +784,17 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible = self.settings.is_none()
+            && self.project_picker.is_none()
+            && self.pending_project.is_none()
+            && (self.changes.is_none() || window.viewport_size().width >= px(1150.));
+        let thread_id = self
+            .thread
+            .as_ref()
+            .map(|thread| thread.read(cx).thread_id().clone());
+        self.visit.update(cx, |visit, cx| {
+            visit.set_target(thread_id, visible, window, cx)
+        });
         if self.restore_settings_focus {
             self.restore_settings_focus = false;
             let focus = self
