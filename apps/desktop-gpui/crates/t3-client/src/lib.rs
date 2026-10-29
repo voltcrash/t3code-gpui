@@ -26,5 +26,6 @@ pub mod thread_actions;
 pub mod thread_search;
 pub mod tool_detail;
 pub mod tool_images;
+pub mod visits;
 
 pub use rpc::{RpcClient, RpcError, Subscription};

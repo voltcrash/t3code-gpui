@@ -31,6 +31,7 @@ pub struct ServerState {
     /// `None` until `server.getSettings` answers.
     pub settings: Option<Settings>,
     pub thread_find: bool,
+    pub thread_visited_tracking: bool,
     pub thread_find_progressive: bool,
 }
 
@@ -40,6 +41,8 @@ impl ServerState {
         match item {
             ConfigStreamItem::Snapshot { config } => {
                 self.thread_find = config["threadFind"] == true;
+                self.thread_visited_tracking =
+                    config["environment"]["capabilities"]["threadVisitedTracking"] == true;
                 self.thread_find_progressive = config["threadFindProgressive"] == true;
                 self.providers = providers::from_config(&config);
                 self.providers_loaded = true;
@@ -102,6 +105,21 @@ mod tests {
         );
         let other = json!({ "version": 1, "type": "keybindingsUpdated", "payload": {} });
         assert!(!ServerState::default().apply(serde_json::from_value(other).unwrap()));
+    }
+
+    #[test]
+    fn visit_tracking_requires_the_server_capability() {
+        let mut state = ServerState::default();
+        state.apply(ConfigStreamItem::Snapshot {
+            config: json!({"environment":{"capabilities":{"threadVisitedTracking":true}}}),
+        });
+        assert!(state.thread_visited_tracking);
+        state.apply(ConfigStreamItem::ProviderStatuses {
+            payload: json!({"providers":[]}),
+        });
+        assert!(state.thread_visited_tracking);
+        state.apply(ConfigStreamItem::Snapshot { config: json!({}) });
+        assert!(!state.thread_visited_tracking);
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod task_progress;
 mod thread_actions;
 mod thread_find;
 mod thread_view;
+mod thread_visit;
 mod tokio_bridge;
 mod tool_detail;
 mod workspace;
