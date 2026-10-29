@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 
+const brandAssets = NodeURL.fileURLToPath(new URL("../../../assets/prod/", import.meta.url));
 const appLicense = NodeURL.fileURLToPath(new URL("../../../LICENSE", import.meta.url));
 
 async function requirePath(file, directory = false) {
@@ -124,7 +125,39 @@ export async function bundle({
       NodePath.join(serverRoot, "node_modules"),
       NodePath.join(resources, "server/node_modules"),
     );
+    if (platform === "linux") {
+      const launcher = NodePath.join(stage, "share/applications/t3code.desktop");
+      const icon = NodePath.join(stage, "share/icons/hicolor/scalable/apps/t3code.svg");
+      await NodeFSP.mkdir(NodePath.dirname(launcher), { recursive: true });
+      await NodeFSP.mkdir(NodePath.dirname(icon), { recursive: true });
+      await NodeFSP.copyFile(NodePath.join(brandAssets, "logo.svg"), icon);
+      await NodeFSP.writeFile(
+        launcher,
+        `[Desktop Entry]
+Type=Application
+Name=T3 Code
+Comment=GUI for coding agents
+Exec=t3-desktop
+Icon=t3code
+StartupWMClass=t3code
+Terminal=false
+Categories=Development;IDE;
+`,
+      );
+    }
     if (platform === "darwin") {
+      // ICNS permits a PNG-backed 1024px icon in an ic10 element; macOS
+      // scales it for Finder and the Dock without an Electron conversion step.
+      const png = await NodeFSP.readFile(NodePath.join(brandAssets, "black-macos-1024.png"));
+      const header = Buffer.alloc(16);
+      header.write("icns", 0, "ascii");
+      header.writeUInt32BE(png.length + 16, 4);
+      header.write("ic10", 8, "ascii");
+      header.writeUInt32BE(png.length + 8, 12);
+      await NodeFSP.writeFile(
+        NodePath.join(resources, "t3-code.icns"),
+        Buffer.concat([header, png]),
+      );
       await NodeFSP.writeFile(
         NodePath.join(contents, "Info.plist"),
         `<?xml version="1.0" encoding="UTF-8"?>
@@ -133,6 +166,7 @@ export async function bundle({
 <key>CFBundleExecutable</key><string>t3-desktop</string>
 <key>CFBundleIdentifier</key><string>com.t3tools.t3code</string>
 <key>CFBundleName</key><string>T3 Code</string>
+<key>CFBundleIconFile</key><string>t3-code.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${releaseVersion}</string>
 <key>CFBundleVersion</key><string>${releaseVersion}</string>

@@ -73,6 +73,17 @@ NodeTest.test(
         await NodeFSP.stat(NodePath.join(output, "resources/server/userdata")).catch(() => null),
         null,
       );
+      NodeAssert.match(
+        await NodeFSP.readFile(NodePath.join(output, "share/applications/t3code.desktop"), "utf8"),
+        /Exec=t3-desktop\nIcon=t3code\nStartupWMClass=t3code/,
+      );
+      NodeAssert.match(
+        await NodeFSP.readFile(
+          NodePath.join(output, "share/icons/hicolor/scalable/apps/t3code.svg"),
+          "utf8",
+        ),
+        /<svg/,
+      );
     });
   },
 );
@@ -89,6 +100,18 @@ NodeTest.test("macOS and Windows layouts match the native launcher's resource pa
     NodeAssert.ok(
       (await NodeFSP.stat(NodePath.join(mac, "Contents/Resources/node/bin/node"))).isFile(),
     );
+    NodeAssert.match(
+      await NodeFSP.readFile(NodePath.join(mac, "Contents/Info.plist"), "utf8"),
+      /<key>CFBundleIconFile<\/key><string>t3-code.icns<\/string>/,
+    );
+    const icon = await NodeFSP.readFile(NodePath.join(mac, "Contents/Resources/t3-code.icns"));
+    NodeAssert.equal(icon.toString("ascii", 0, 4), "icns");
+    NodeAssert.equal(icon.readUInt32BE(4), icon.length);
+    NodeAssert.equal(icon.toString("ascii", 8, 12), "ic10");
+    NodeAssert.equal(icon.readUInt32BE(12), icon.length - 8);
+    NodeAssert.deepEqual(icon.subarray(16, 24), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    NodeAssert.equal(icon.readUInt32BE(32), 1024);
+    NodeAssert.equal(icon.readUInt32BE(36), 1024);
     const win = NodePath.join(input.root, "windows");
     await bundle({ ...input, output: win, platform: "win32" });
     NodeAssert.equal(

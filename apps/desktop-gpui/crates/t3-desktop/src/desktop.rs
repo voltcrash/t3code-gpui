@@ -116,6 +116,8 @@ pub fn activate(cx: &mut App) {
         window_bounds: Some(crate::window_state::initial(cx)),
         window_min_size: Some(size(px(640.), px(420.))),
         app_id: Some("t3code".into()),
+        #[cfg(target_os = "linux")]
+        icon: Some(crate::assets::window_icon()),
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {

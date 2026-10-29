@@ -58,3 +58,20 @@ impl AssetSource for AppAssets {
         Ok(paths)
     }
 }
+
+#[cfg(target_os = "linux")]
+pub fn window_icon() -> std::sync::Arc<image::RgbaImage> {
+    let bytes: &[u8] = if cfg!(debug_assertions) {
+        include_bytes!("../../../../../assets/dev/blueprint-universal-1024.png")
+    } else {
+        include_bytes!("../../../../../assets/prod/black-universal-1024.png")
+    };
+    // _NET_WM_ICON is sent over X11; a full 1024px source would add 4 MiB
+    // to window creation for an icon that taskbars display at a fraction of that.
+    std::sync::Arc::new(
+        image::load_from_memory(bytes)
+            .expect("bundled app icon is a valid PNG")
+            .thumbnail(256, 256)
+            .into_rgba8(),
+    )
+}

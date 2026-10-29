@@ -6469,6 +6469,7 @@ name = "t3-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "futures-util",
  "gpui-kit",
  "image",
