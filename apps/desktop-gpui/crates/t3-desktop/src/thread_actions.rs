@@ -230,6 +230,12 @@ pub fn menu(
         return menu;
     };
     let disabled = env.rpc.is_none() || state.busy.contains(thread_id) || state.dialog.is_some();
+    let copy_id = thread.id.clone();
+    menu = menu.item(
+        PopupMenuItem::new("Copy thread ID").on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
+        }),
+    );
     for (action, enabled) in menu_actions(thread, env.thread_actions) {
         let target = actions.downgrade();
         let id = thread_id.to_owned();
