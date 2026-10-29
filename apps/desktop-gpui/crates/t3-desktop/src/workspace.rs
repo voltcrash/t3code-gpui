@@ -35,12 +35,31 @@ actions!(
         TogglePlanMode,
         ToggleSidebar,
         ToggleThreadPin,
-        ToggleThreadSettlement
+        ToggleThreadSettlement,
+        PreviousThread,
+        NextThread
     ]
 );
 
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = workspace, no_json)]
+pub struct JumpToThread {
+    index: usize,
+}
+
+fn traversal_bindings() -> Vec<KeyBinding> {
+    vec![
+        // Linux reports shifted punctuation as the symbol with Shift removed.
+        KeyBinding::new("secondary-{", PreviousThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-}", NextThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-[", PreviousThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-]", NextThread, Some(CONTEXT)),
+    ]
+}
+
 /// `chat.new` in `packages/shared/src/keybindings.ts`.
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(traversal_bindings());
     cx.bind_keys([
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
@@ -56,6 +75,13 @@ pub fn bind_keys(cx: &mut App) {
             Some("NativePlanComposer > Input"),
         ),
     ]);
+    for index in 0..9 {
+        cx.bind_keys([KeyBinding::new(
+            &format!("secondary-{}", index + 1),
+            JumpToThread { index },
+            Some(CONTEXT),
+        )]);
+    }
 }
 
 pub struct Workspace {
@@ -81,6 +107,22 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn navigate_thread(
+        &mut self,
+        destination: t3_client::navigation::Destination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.navigate(destination, window, cx));
+    }
+
     fn thread_shortcut(
         &mut self,
         shortcut: t3_client::thread_actions::Shortcut,
@@ -753,6 +795,19 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .relative()
             .key_context(CONTEXT)
+            .on_action(cx.listener(|this, _: &PreviousThread, window, cx| {
+                this.navigate_thread(t3_client::navigation::Destination::Previous, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextThread, window, cx| {
+                this.navigate_thread(t3_client::navigation::Destination::Next, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &JumpToThread, window, cx| {
+                this.navigate_thread(
+                    t3_client::navigation::Destination::Index(action.index),
+                    window,
+                    cx,
+                )
+            }))
             .on_action(cx.listener(|this, _: &ToggleThreadPin, window, cx| {
                 this.thread_shortcut(t3_client::thread_actions::Shortcut::TogglePin, window, cx)
             }))
@@ -860,5 +915,47 @@ impl Render for Workspace {
                     .p_4()
                     .child(picker.clone())
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NextThread, PreviousThread, traversal_bindings};
+    use gpui_kit::{Action, Keystroke, Modifiers};
+
+    #[test]
+    fn traversal_accepts_linux_shifted_symbols_and_explicit_shift_brackets() {
+        let bindings = traversal_bindings();
+        for (key, shift, previous) in [
+            ("{", false, true),
+            ("}", false, false),
+            ("[", true, true),
+            ("]", true, false),
+        ] {
+            let mut modifiers = if cfg!(target_os = "macos") {
+                Modifiers::command()
+            } else {
+                Modifiers::control()
+            };
+            modifiers.shift = shift;
+            let typed = Keystroke {
+                modifiers,
+                key: key.into(),
+                key_char: None,
+            };
+            let matched = bindings.iter().find(|binding| {
+                binding.match_keystrokes(std::slice::from_ref(&typed)) == Some(false)
+            });
+            let expected = if previous {
+                PreviousThread.name()
+            } else {
+                NextThread.name()
+            };
+            assert_eq!(
+                matched.map(|binding| binding.action().name()),
+                Some(expected),
+                "{typed:?}"
+            );
+        }
     }
 }
