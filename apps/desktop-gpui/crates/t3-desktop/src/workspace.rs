@@ -28,7 +28,13 @@ const CONTEXT: &str = "Workspace";
 
 actions!(
     workspace,
-    [NewThread, FindInThread, ToggleChanges, TogglePlanMode]
+    [
+        NewThread,
+        FindInThread,
+        ToggleChanges,
+        TogglePlanMode,
+        ToggleSidebar
+    ]
 );
 
 /// `chat.new` in `packages/shared/src/keybindings.ts`.
@@ -37,6 +43,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-b", ToggleSidebar, Some(CONTEXT)),
         KeyBinding::new("secondary-d", ToggleChanges, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-a", TogglePlanMode, Some(CONTEXT)),
         KeyBinding::new(
@@ -53,6 +60,8 @@ pub struct Workspace {
     menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
     sidebar: Entity<Sidebar>,
+    sidebar_visible: bool,
+    sidebar_focus: FocusHandle,
     actions: Entity<ThreadActions>,
     thread: Option<Entity<ThreadView>>,
     draft: Option<(Entity<DraftView>, Subscription)>,
@@ -68,6 +77,14 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
+            self.focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.is_some()
             || self.project_picker.is_some()
@@ -198,6 +215,8 @@ impl Workspace {
             menu: AppMenuBar::new(cx),
             env,
             sidebar,
+            sidebar_visible: true,
+            sidebar_focus: cx.focus_handle(),
             actions,
             thread: None,
             draft: None,
@@ -423,7 +442,26 @@ impl Workspace {
             .gap_2()
             .border_b_1()
             .bg(crate::appearance::palette(cx).color("toolbar"))
-            .border_color(crate::appearance::palette(cx).color("toolbarBorder"));
+            .border_color(crate::appearance::palette(cx).color("toolbarBorder"))
+            .child(
+                Button::new("toggle-sidebar")
+                    .icon(gpui_kit::component::Icon::new(
+                        gpui_kit::assets::IconName::PanelLeft,
+                    ))
+                    .ghost()
+                    .small()
+                    .accessibility_label(if self.sidebar_visible {
+                        "Hide sidebar"
+                    } else {
+                        "Show sidebar"
+                    })
+                    .tooltip(if self.sidebar_visible {
+                        "Hide sidebar (Cmd/Ctrl+B)"
+                    } else {
+                        "Show sidebar (Cmd/Ctrl+B)"
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+            );
         let header = match (thread, &self.draft) {
             (_, Some(_)) => header.child(div().text_sm().font_medium().child("New thread")),
             (Some(thread), None) => {
@@ -693,6 +731,9 @@ impl Render for Workspace {
             .key_context(CONTEXT)
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
             .on_action(
+                cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &FindInThread, window, cx| this.find_in_thread(window, cx)),
             )
             .on_action(
@@ -739,13 +780,16 @@ impl Render for Workspace {
                     .w_full()
                     .flex_1()
                     .min_h_0()
-                    .child(
-                        div()
-                            .w(SIDEBAR_WIDTH)
-                            .h_full()
-                            .flex_none()
-                            .child(self.sidebar.clone()),
-                    )
+                    .when(self.sidebar_visible, |row| {
+                        row.child(
+                            div()
+                                .track_focus(&self.sidebar_focus)
+                                .w(SIDEBAR_WIDTH)
+                                .h_full()
+                                .flex_none()
+                                .child(self.sidebar.clone()),
+                        )
+                    })
                     .child(self.render_main(window.viewport_size().width, cx)),
             )
             .when(self.actions.read(cx).has_dialog(), |root| {
