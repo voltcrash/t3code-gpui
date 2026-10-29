@@ -10,6 +10,7 @@ use crate::shell::ThreadShell;
 pub struct Capabilities {
     pub pinning: bool,
     pub settlement: bool,
+    pub visited_tracking: bool,
 }
 
 impl Capabilities {
@@ -18,6 +19,7 @@ impl Capabilities {
         Self {
             pinning: capabilities["threadPinning"] == true,
             settlement: capabilities["threadSettlement"] == true,
+            visited_tracking: capabilities["threadVisitedTracking"] == true,
         }
     }
 }
@@ -31,6 +33,7 @@ pub enum Action {
     Unsettle,
     Archive,
     Restore,
+    MarkUnread,
     Delete,
 }
 
@@ -44,6 +47,7 @@ impl Action {
             Self::Unsettle => "Un-settle thread",
             Self::Archive => "Archive thread",
             Self::Restore => "Restore thread",
+            Self::MarkUnread => "Mark unread",
             Self::Delete => "Delete thread",
         }
     }
@@ -57,6 +61,7 @@ impl Action {
             Self::Unsettle => "thread.unsettle",
             Self::Archive => "thread.archive",
             Self::Restore => "thread.unarchive",
+            Self::MarkUnread => "thread.mark-unread",
             Self::Delete => "thread.delete",
         };
         let mut command = json!({
@@ -127,6 +132,12 @@ pub fn menu_actions(thread: &ThreadShell, capabilities: Capabilities) -> Vec<(Ac
         };
         actions.push((Action::Archive, can_archive));
     }
+    if capabilities.visited_tracking {
+        actions.push((
+            Action::MarkUnread,
+            thread.latest_run_completed_at().is_some(),
+        ));
+    }
     actions.push((Action::Delete, true));
     actions
 }
@@ -149,6 +160,7 @@ mod tests {
         let caps = Capabilities {
             pinning: true,
             settlement: true,
+            ..Default::default()
         };
         let active = menu_actions(&thread(json!({})), caps);
         assert!(active.contains(&(Action::Pin, true)));
@@ -181,6 +193,7 @@ mod tests {
         let caps = Capabilities {
             pinning: true,
             settlement: true,
+            ..Default::default()
         };
         let active = thread(json!({}));
         assert_eq!(Shortcut::TogglePin.action(&active, caps), Some(Action::Pin));
@@ -217,6 +230,31 @@ mod tests {
             .command(&organized.id);
         assert_eq!(unsettle["type"], "thread.unsettle");
         assert_eq!(unsettle["reason"], "user");
+    }
+
+    #[test]
+    fn marking_unread_uses_server_read_state_even_for_archived_threads() {
+        let caps = Capabilities {
+            visited_tracking: true,
+            ..Default::default()
+        };
+        assert!(menu_actions(&thread(json!({})), caps).contains(&(Action::MarkUnread, false)));
+        for patch in [json!({}), json!({"archivedAt":"2026-01-01T00:00:00Z"})] {
+            let mut patch = patch;
+            patch["latestRunId"] = "run-1".into();
+            patch["latestRunCompletedAt"] = "2026-01-01T01:00:00Z".into();
+            let thread = thread(patch);
+            assert!(menu_actions(&thread, caps).contains(&(Action::MarkUnread, true)));
+            assert!(
+                !menu_actions(&thread, Capabilities::default())
+                    .iter()
+                    .any(|(action, _)| *action == Action::MarkUnread)
+            );
+            let command = Action::MarkUnread.command(&thread.id);
+            assert_eq!(command["type"], "thread.mark-unread");
+            assert_eq!(command["threadId"], thread.id);
+            assert!(command.get("visitedAt").is_none());
+        }
     }
 
     #[test]

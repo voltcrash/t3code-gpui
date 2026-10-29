@@ -1031,6 +1031,9 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
                     .is_some_and(|thread| thread.settled_override.as_deref() == Some("settled")),
                 Action::Unsettle => active
                     .is_some_and(|thread| thread.settled_override.as_deref() == Some("active")),
+                Action::MarkUnread => active
+                    .or(archived)
+                    .is_some_and(|thread| thread.has_unseen_completion()),
                 Action::Archive => active.is_none() && archived.is_some(),
                 Action::Restore => active.is_some() && archived.is_none(),
                 Action::Delete => active.is_none() && archived.is_none(),
