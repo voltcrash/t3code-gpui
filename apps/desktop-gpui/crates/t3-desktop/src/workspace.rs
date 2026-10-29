@@ -1,6 +1,8 @@
 //! The window's root: sidebar beside the open thread or a new-thread draft.
 
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::StyledExt;
+use gpui_kit::component::command::CommandState;
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::{ActiveTheme, Disableable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
@@ -30,6 +32,9 @@ actions!(
     workspace,
     [
         NewThread,
+        AddProject,
+        ToggleCommandPalette,
+        CloseCommandPalette,
         FindInThread,
         ToggleChanges,
         TogglePlanMode,
@@ -47,6 +52,19 @@ pub struct JumpToThread {
     index: usize,
 }
 
+fn palette_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("secondary-k", ToggleCommandPalette, Some(CONTEXT)),
+        // Command's default Escape only clears the query; the app dismisses it.
+        KeyBinding::new("escape", CloseCommandPalette, Some("Workspace > Command")),
+        KeyBinding::new(
+            "escape",
+            CloseCommandPalette,
+            Some("Workspace > Command > Input"),
+        ),
+    ]
+}
+
 fn traversal_bindings() -> Vec<KeyBinding> {
     vec![
         // Linux reports shifted punctuation as the symbol with Shift removed.
@@ -60,9 +78,10 @@ fn traversal_bindings() -> Vec<KeyBinding> {
 /// `chat.new` in `packages/shared/src/keybindings.ts`.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(traversal_bindings());
+    cx.bind_keys(palette_bindings());
     cx.bind_keys([
-        KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-p", ToggleThreadPin, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-s", ToggleThreadSettlement, Some(CONTEXT)),
@@ -86,6 +105,9 @@ pub fn bind_keys(cx: &mut App) {
 
 pub struct Workspace {
     focus: FocusHandle,
+    palette: Option<Entity<CommandState>>,
+    palette_focus: FocusHandle,
+    palette_return_focus: Option<FocusHandle>,
     zoom: f32,
     menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
@@ -108,12 +130,47 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_none() {
+            return;
+        }
+        self.palette_return_focus
+            .take()
+            .unwrap_or_else(|| self.focus.clone())
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        if self.project_picker.is_some() || self.actions.read(cx).has_dialog() {
+            return;
+        }
+        self.palette_return_focus = window.focused(cx);
+        let palette = cx.new(|cx| CommandState::new(window, cx));
+        palette.read(cx).focus_handle(cx).focus(window, cx);
+        self.palette = Some(palette);
+        let this = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = this.update(cx, |this, cx| {
+                if let Some(palette) = &this.palette {
+                    palette.read(cx).focus_handle(cx).focus(window, cx);
+                }
+            });
+        });
+        cx.notify();
+    }
+
     fn navigate_thread(
         &mut self,
         destination: t3_client::navigation::Destination,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_palette(window, cx);
         if self.settings.is_some()
             || self.project_picker.is_some()
             || self.actions.read(cx).has_dialog()
@@ -130,6 +187,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_palette(window, cx);
         if self.settings.is_some()
             || self.project_picker.is_some()
             || self.actions.read(cx).has_dialog()
@@ -145,6 +203,7 @@ impl Workspace {
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         self.sidebar_visible = !self.sidebar_visible;
         if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
             self.focus.focus(window, cx);
@@ -153,6 +212,7 @@ impl Workspace {
     }
 
     fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         if self.settings.is_some()
             || self.project_picker.is_some()
             || self.actions.read(cx).has_dialog()
@@ -182,6 +242,7 @@ impl Workspace {
     }
 
     fn toggle_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         if self.settings.is_some()
             || self.project_picker.is_some()
             || self.actions.read(cx).has_dialog()
@@ -206,6 +267,7 @@ impl Workspace {
         cx.notify();
     }
     fn find_in_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         if self.settings.is_some()
             || self.project_picker.is_some()
             || self.actions.read(cx).has_dialog()
@@ -279,6 +341,9 @@ impl Workspace {
         ];
         Self {
             focus,
+            palette: None,
+            palette_focus: cx.focus_handle(),
+            palette_return_focus: None,
             zoom: 1.,
             menu: AppMenuBar::new(cx),
             env,
@@ -302,6 +367,7 @@ impl Workspace {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         if self.settings.is_some()
             || self.project_picker.is_some()
             || self.actions.read(cx).has_dialog()
@@ -323,6 +389,7 @@ impl Workspace {
     /// Opens a draft in the open thread's project, else the draft's own,
     /// else the most recently active one.
     fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         if self.actions.read(cx).has_dialog() {
             return;
         }
@@ -383,6 +450,7 @@ impl Workspace {
     }
 
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
         if self.actions.read(cx).has_dialog() {
             return;
         }
@@ -809,6 +877,23 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .relative()
             .key_context(CONTEXT)
+            .on_action(cx.listener(|this, _: &CloseCommandPalette, window, cx| {
+                this.close_palette(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                this.toggle_palette(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &AddProject, window, cx| this.add_project(window, cx)))
+            .on_action(cx.listener(
+                |this, action: &crate::command_palette::OpenThread, window, cx| {
+                    this.close_palette(window, cx);
+                    if this.env.read(cx).thread(&action.thread_id).is_some() {
+                        this.sidebar.update(cx, |sidebar, cx| {
+                            sidebar.select(action.thread_id.clone(), cx)
+                        });
+                    }
+                },
+            ))
             .on_action(cx.listener(|this, _: &PreviousThread, window, cx| {
                 this.navigate_thread(t3_client::navigation::Destination::Previous, window, cx)
             }))
@@ -895,6 +980,70 @@ impl Render for Workspace {
                     })
                     .child(self.render_main(window.viewport_size().width, cx)),
             )
+            .children(self.palette.as_ref().map(|palette| {
+                let this = cx.weak_entity();
+                let cancel = this.clone();
+                let thread_id = self
+                    .thread
+                    .as_ref()
+                    .filter(|_| self.settings.is_none())
+                    .map(|thread| thread.read(cx).thread_id().clone());
+                let can_plan = self.settings.is_none()
+                    && (self
+                        .draft
+                        .as_ref()
+                        .is_some_and(|(draft, _)| draft.read(cx).can_toggle_plan_mode(cx))
+                        || self
+                            .thread
+                            .as_ref()
+                            .is_some_and(|thread| thread.read(cx).can_toggle_plan_mode(cx)));
+                let command = crate::command_palette::content(
+                    palette,
+                    self.env.read(cx),
+                    thread_id.as_deref(),
+                    can_plan,
+                    self.sidebar_visible,
+                )
+                .on_confirm(move |_, window, cx| {
+                    let _ = this.update(cx, |this, cx| this.close_palette(window, cx));
+                })
+                .on_cancel(move |window, cx| {
+                    let cancel = cancel.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = cancel.update(cx, |this, cx| this.close_palette(window, cx));
+                    });
+                });
+                div()
+                    .absolute()
+                    .inset_0()
+                    .occlude()
+                    .bg(cx.theme().background.opacity(0.7))
+                    .flex()
+                    .items_start()
+                    .justify_center()
+                    .pt(px(100.))
+                    .px_4()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                    )
+                    .child(
+                        div()
+                            .id("command-palette")
+                            .role(Role::Dialog)
+                            .aria_label("Command palette")
+                            .w_full()
+                            .max_w(px(640.))
+                            .bg(cx.theme().background)
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .shadow_lg()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(command)
+                            .focus_trap("command-palette", &self.palette_focus),
+                    )
+            }))
             .when(self.actions.read(cx).has_dialog(), |root| {
                 root.child(
                     div()
@@ -934,8 +1083,44 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{NextThread, PreviousThread, traversal_bindings};
-    use gpui_kit::{Action, Keystroke, Modifiers};
+    use super::{
+        CloseCommandPalette, NextThread, PreviousThread, palette_bindings, traversal_bindings,
+    };
+    use gpui_kit::{Action, KeyBinding, KeyContext, Keymap, Keystroke, Modifiers};
+
+    #[test]
+    fn escape_dismisses_the_palette_instead_of_only_clearing_its_query() {
+        let mut keymap = Keymap::new(vec![
+            KeyBinding::new("escape", gpui_kit::base::actions::Cancel, Some("Command")),
+            KeyBinding::new("escape", gpui_kit::component::input::Escape, Some("Input")),
+        ]);
+        keymap.add_bindings(palette_bindings());
+        let typed = Keystroke::parse("escape").unwrap();
+        for scopes in [
+            vec!["Workspace", "Command"],
+            vec!["Workspace", "Command", "Input"],
+        ] {
+            let contexts: Vec<_> = scopes
+                .iter()
+                .map(|scope| KeyContext::parse(scope).unwrap())
+                .collect();
+            let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&typed), &contexts);
+            assert_eq!(
+                bindings.first().map(|binding| binding.action().name()),
+                Some(CloseCommandPalette.name()),
+                "{scopes:?}"
+            );
+        }
+        let contexts = [
+            KeyContext::parse("Workspace").unwrap(),
+            KeyContext::parse("Input").unwrap(),
+        ];
+        let (bindings, _) = keymap.bindings_for_input(&[typed], &contexts);
+        assert_eq!(
+            bindings.first().map(|binding| binding.action().name()),
+            Some(gpui_kit::component::input::Escape.name())
+        );
+    }
 
     #[test]
     fn traversal_accepts_linux_shifted_symbols_and_explicit_shift_brackets() {

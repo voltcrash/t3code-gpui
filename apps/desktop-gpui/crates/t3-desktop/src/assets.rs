@@ -8,8 +8,29 @@ use gpui_kit::{AssetSource, Result, SharedString};
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        Pin, AlarmClock, GitBranch, ArrowUp, Square, SquarePen, FolderPlus, Trash, X, Ellipsis,
-        Settings, Paperclip, FolderCode, ListTodo, CircleDot, Circle, PanelLeft
+        Pin,
+        AlarmClock,
+        GitBranch,
+        ArrowUp,
+        Square,
+        SquarePen,
+        FolderPlus,
+        Trash,
+        X,
+        Ellipsis,
+        Settings,
+        Paperclip,
+        FolderCode,
+        ListTodo,
+        CircleDot,
+        Circle,
+        PanelLeft,
+        FileDiff,
+        ZoomIn,
+        ZoomOut,
+        Maximize,
+        ArrowDown,
+        MessageSquare
     ]
 );
 
