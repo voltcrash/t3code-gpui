@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config;
 pub mod find;
 pub mod history;
+pub mod message_drafts;
 pub mod navigation;
 pub mod notifications;
 pub mod planning;
