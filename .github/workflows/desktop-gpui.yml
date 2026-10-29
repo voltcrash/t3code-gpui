@@ -1,0 +1,64 @@
+name: Desktop (GPUI)
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop-gpui/**"
+      # The integration tests drive the real server from source.
+      - "apps/server/**"
+      - "packages/**"
+      - ".github/workflows/desktop-gpui.yml"
+  push:
+    branches:
+      - gpui
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-gpui-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    working-directory: apps/desktop-gpui
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # GPUI links against the Wayland, X11, and font stacks.
+      - name: Install GPUI system libraries
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libx11-xcb-dev libfontconfig-dev libfreetype-dev libvulkan-dev
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop-gpui
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked

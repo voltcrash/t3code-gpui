@@ -1,0 +1,1227 @@
+//! Drives the real server from source, the way the desktop app will.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+use t3_client::auth::{self, ClientMetadata};
+use t3_client::config::{ConfigStreamItem, ServerState};
+use t3_client::projects;
+use t3_client::shell::{ShellState, ShellStreamItem};
+use t3_client::thread::{ThreadState, ThreadStreamItem};
+use t3_client::{RpcClient, RpcError};
+use t3_host::{Backend, BackendLaunch};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../..")
+        .canonicalize()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn launches_authenticates_and_streams_from_the_real_server() {
+    let repo = repo_root();
+    let home =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("t3-home-{}", std::process::id()));
+    let review_workspace = home.join("review-workspace");
+    prepare_review_workspace(&review_workspace).await;
+    let seeded =
+        tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
+            .current_dir(repo.join("apps/server"))
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("history-fixture.mjs"),
+            ])
+            .arg(home.join("userdata/statev2.sqlite"))
+            .arg(&review_workspace)
+            .output()
+            .await
+            .unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    let checkpoint_workspace = home.join("checkpoint-workspace");
+    let seeded =
+        tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
+            .current_dir(repo.join("apps/server"))
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("checkpoint-fixture.mjs"),
+            ])
+            .arg(home.join("userdata/statev2.sqlite"))
+            .arg(&checkpoint_workspace)
+            .output()
+            .await
+            .unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    let planned =
+        tokio::process::Command::new(std::env::var_os("T3_NODE").unwrap_or_else(|| "node".into()))
+            .current_dir(repo.join("apps/server"))
+            .args([
+                "--input-type=module",
+                "--eval",
+                include_str!("plan-fixture.mjs"),
+            ])
+            .arg(home.join("userdata/statev2.sqlite"))
+            .output()
+            .await
+            .unwrap();
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    let mut backend = Backend::spawn(BackendLaunch {
+        node: std::env::var_os("T3_NODE").map_or_else(|| "node".into(), PathBuf::from),
+        entry: repo.join("apps/server/src/bin.ts"),
+        cwd: repo.clone(),
+        t3_home: home.clone(),
+        port: None,
+    })
+    .await
+    .unwrap();
+    // First start runs every migration, which is slow on a cold CI runner.
+    backend.wait_ready(Duration::from_secs(120)).await.unwrap();
+
+    let http = reqwest::Client::new();
+    let metadata = ClientMetadata {
+        label: "T3 Code GPUI test".into(),
+        app_version: "0.0.0".into(),
+    };
+    let token = auth::exchange_bootstrap_credential(
+        &http,
+        backend.http_base(),
+        &backend.bootstrap_token(),
+        &metadata,
+    )
+    .await
+    .unwrap();
+    let url = auth::websocket_url(&http, backend.http_base(), &token.access_token, &metadata)
+        .await
+        .unwrap();
+    let client = RpcClient::connect(&url).await.unwrap();
+    verifies_progressive_history(&client, &http, backend.http_base(), &token.access_token).await;
+    verifies_review(&client, &review_workspace).await;
+    verifies_checkpoint_review(&client, &checkpoint_workspace).await;
+    verifies_attachments(&client, &http, backend.http_base(), &home).await;
+    verifies_planning(&client).await;
+    verifies_tasks(&client).await;
+    verifies_sidebar_search(&client).await;
+    verifies_tool_detail(&client, &http, backend.http_base()).await;
+
+    let config: Value = client.call("server.getConfig", &json!({})).await.unwrap();
+    assert!(
+        config["environment"]["environmentId"].is_string(),
+        "{config}"
+    );
+
+    let mut updates = client.subscribe::<_, ConfigStreamItem>("subscribeServerConfig", &json!({}));
+    let first = updates.next().await.unwrap().unwrap();
+    assert!(matches!(first, ConfigStreamItem::Snapshot { .. }));
+    let mut server = ServerState::default();
+    server.apply(first);
+
+    let unknown = client
+        .call::<_, Value>("no.such.method", &json!({}))
+        .await
+        .unwrap_err();
+    assert!(matches!(unknown, RpcError::Defect(_)), "{unknown:?}");
+
+    // The commands decode: the orchestrator, not the schema, rejects them.
+    assert!(t3_client::commands::supported(&config));
+    let missing = "thread-that-does-not-exist";
+    for command in [
+        t3_client::commands::stop_thread(missing),
+        t3_client::commands::send_message(
+            missing,
+            "hello",
+            Some(&json!({ "instanceId": "codex", "model": "gpt-6-astra" })),
+            &[],
+        ),
+        t3_client::commands::set_runtime_mode(missing, "approval-required"),
+        t3_client::commands::respond_to_approval(missing, "request", "decline", Some("no")),
+        t3_client::commands::respond_to_user_input(
+            missing,
+            "request",
+            serde_json::Map::from_iter([("q".to_owned(), json!("answer"))]),
+        ),
+        t3_client::commands::dismiss_user_input(missing, "request"),
+    ] {
+        let rejected = t3_client::commands::dispatch(&client, &command)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            rejected.failure_tag(),
+            Some("OrchestrationV2DispatchCommandError"),
+            "{rejected:?}"
+        );
+        assert!(rejected.detail().contains(missing), "{rejected:?}");
+    }
+
+    // New-thread defaults read the real settings and provider shapes.
+    let settings: Value = client.call("server.getSettings", &json!({})).await.unwrap();
+    serde_json::from_value::<t3_client::providers::Settings>(settings).unwrap();
+    client
+        .call::<_, Value>(
+            "server.updateSettings",
+            &json!({
+                "patch": { "defaultRuntimeMode": "approval-required" },
+            }),
+        )
+        .await
+        .unwrap();
+    while let Some(item) = updates.next().await {
+        let item = item.unwrap();
+        let settings_updated = matches!(item, ConfigStreamItem::SettingsUpdated { .. });
+        server.apply(item);
+        if settings_updated {
+            break;
+        }
+    }
+    assert_eq!(
+        server
+            .settings
+            .as_ref()
+            .unwrap()
+            .default_runtime_mode
+            .as_deref(),
+        Some("approval-required")
+    );
+    drop(updates);
+
+    // Change a real thread's mode and await its persisted event, without
+    // starting a provider process or sending a prompt.
+    let project: Value = client
+        .call(
+            "projects.mutate",
+            &json!({
+                "type": "project.create", "commandId": "create-mode-project",
+                "projectId": "mode-project", "title": "Mode test",
+                "workspaceRoot": home.join("project"), "createWorkspaceRootIfMissing": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let thread_id = "mode-test-thread";
+    t3_client::commands::dispatch(
+        &client,
+        &json!({
+            "type": "thread.create", "commandId": "create-mode-test",
+            "threadId": thread_id, "projectId": project["id"],
+            "createdBy": "user", "creationSource": "web", "title": "Mode test",
+            "modelSelection": { "instanceId": "codex", "model": "gpt-6-astra" },
+            "runtimeMode": "full-access", "interactionMode": "default",
+            "branch": null, "worktreePath": null,
+        }),
+    )
+    .await
+    .unwrap();
+    let mut thread_updates = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &json!({ "threadId": thread_id }),
+    );
+    let mut thread = ThreadState::default();
+    thread.apply(thread_updates.next().await.unwrap().unwrap());
+    assert_eq!(
+        thread
+            .projection
+            .as_ref()
+            .unwrap()
+            .settings()
+            .unwrap()
+            .runtime_mode,
+        "full-access"
+    );
+    t3_client::commands::dispatch(
+        &client,
+        &t3_client::commands::set_runtime_mode(thread_id, "approval-required"),
+    )
+    .await
+    .unwrap();
+    while let Some(item) = thread_updates.next().await {
+        thread.apply(item.unwrap());
+        if thread
+            .projection
+            .as_ref()
+            .unwrap()
+            .settings()
+            .unwrap()
+            .runtime_mode
+            == "approval-required"
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        thread
+            .projection
+            .as_ref()
+            .unwrap()
+            .settings()
+            .unwrap()
+            .runtime_mode,
+        "approval-required"
+    );
+    drop(thread_updates);
+    verifies_thread_lifecycle(&client, thread_id).await;
+    assert_eq!(
+        t3_client::providers::from_config(&config).len(),
+        config["providers"].as_array().map_or(0, Vec::len),
+        "every provider snapshot decodes"
+    );
+    let (_, launch) = t3_client::commands::launch_thread(&t3_client::commands::NewThread {
+        project_id: "project-that-does-not-exist",
+        model_selection: &json!({ "instanceId": "codex", "model": "gpt-6-astra" }),
+        runtime_mode: "full-access",
+        interaction_mode: "default",
+        text: "hello",
+        attachments: &[],
+    });
+    let rejected = client
+        .call::<_, Value>(t3_client::commands::LAUNCH_THREAD, &launch)
+        .await
+        .unwrap_err();
+    assert!(matches!(rejected, RpcError::Failure(_)), "{rejected:?}");
+
+    verifies_project_lifecycle(&client, &home).await;
+
+    // The socket survives an interrupted stream and a failed call.
+    let again: Value = client.call("server.getConfig", &json!({})).await.unwrap();
+    assert_eq!(
+        again["environment"]["environmentId"],
+        config["environment"]["environmentId"]
+    );
+
+    backend.shutdown(Duration::from_secs(10)).await;
+    assert!(!client.closed().await.is_empty());
+    let _ = std::fs::remove_dir_all(home);
+}
+
+async fn verifies_sidebar_search(client: &RpcClient) {
+    use t3_client::thread_search::{self, SearchResult, State};
+    let mut state = State::default();
+    for (query, source) in [("needle", "assistant"), ("Question 35", "user")] {
+        state.set_query(query);
+        let request = state.begin().unwrap();
+        let result: SearchResult = client
+            .call(thread_search::SEARCH, &request.input())
+            .await
+            .unwrap();
+        let found = result
+            .matches
+            .iter()
+            .find(|found| found.thread_id == "history-fixture")
+            .unwrap();
+        assert_eq!(found.project_id, "history-project");
+        assert_eq!(found.source, source);
+        assert!(found.snippet.to_lowercase().contains(&query.to_lowercase()));
+        assert!(state.apply(&request, result));
+    }
+}
+
+async fn verifies_planning(client: &RpcClient) {
+    use t3_client::{commands, planning};
+    let projection: t3_client::thread::ThreadProjection = client
+        .call(
+            "orchestration.getThreadProjection",
+            &json!({"threadId":"planning-fixture"}),
+        )
+        .await
+        .unwrap();
+    let plan = planning::active_plan(&projection).unwrap();
+    assert_eq!(plan.id, "planning-plan");
+    assert_eq!(projection.settings().unwrap().interaction_mode, "plan");
+    for (feedback, expected_mode) in [("  Add a focused test.  ", "plan"), ("", "default")] {
+        let calls = commands::plan_follow_up("planning-fixture", &plan, feedback, None, None);
+        let mut message = calls.last().unwrap().clone();
+        message["dispatchMode"] = json!({"type":"defer_start"});
+        for command in &calls[..calls.len() - 1] {
+            commands::dispatch(client, command).await.unwrap();
+        }
+        // A prepared run commits the message and plan reference without starting a provider.
+        commands::dispatch(client, &message).await.unwrap();
+        let projection: Value = client
+            .call(
+                "orchestration.getThreadProjection",
+                &json!({"threadId":"planning-fixture"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(projection["thread"]["interactionMode"], expected_mode);
+        let run = projection["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .max_by_key(|run| run["ordinal"].as_u64())
+            .unwrap();
+        if feedback.is_empty() {
+            assert_eq!(
+                run["sourcePlanRef"],
+                json!({"threadId":"planning-fixture", "planId":"planning-plan"})
+            );
+            assert!(
+                message["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("PLEASE IMPLEMENT THIS PLAN:\n# Native planning")
+            );
+        } else {
+            assert!(run["sourcePlanRef"].is_null());
+            assert_eq!(message["text"], "Add a focused test.");
+        }
+        commands::dispatch(client, &commands::stop_thread("planning-fixture"))
+            .await
+            .unwrap();
+    }
+}
+
+async fn verifies_attachments(
+    client: &RpcClient,
+    http: &reqwest::Client,
+    base: &url::Url,
+    home: &std::path::Path,
+) {
+    use t3_client::attachments::{self, Client, Metadata};
+    let transfer = Client::new(http.clone(), base.clone());
+    let bytes = b"A fixture attachment with spaces in its name.\n".to_vec();
+    let uploaded = transfer
+        .upload(
+            client,
+            attachments::metadata("notes with spaces.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transfer
+            .download(client, &uploaded.attachment)
+            .await
+            .unwrap(),
+        bytes
+    );
+    let orphan = uploaded.attachment.clone();
+    uploaded.discard().await.unwrap();
+    assert!(
+        transfer.download(client, &orphan).await.is_err(),
+        "removing a draft discards its pending upload"
+    );
+    let shutdown_upload = transfer
+        .upload(
+            client,
+            attachments::metadata("shutdown.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    transfer.discard_pending().await;
+    assert!(
+        transfer
+            .download(client, &shutdown_upload.attachment)
+            .await
+            .is_err(),
+        "shutdown cleanup releases uploads while their draft owners still exist"
+    );
+    drop(shutdown_upload);
+
+    let pending = transfer
+        .upload(
+            client,
+            attachments::metadata("notes.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    let references = [pending.attachment.clone()];
+    let mut command = t3_client::commands::send_message("history-fixture", "", None, &references);
+    command["dispatchMode"] = json!({"type":"defer_start"});
+    // Persist the message without releasing its prepared run or starting a provider.
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input("history-fixture", None),
+    );
+    let mut state = ThreadState::default();
+    while let Some(item) = stream.next().await {
+        state.apply(item.unwrap());
+        if state.synchronized {
+            break;
+        }
+    }
+    t3_client::commands::dispatch(client, &command)
+        .await
+        .unwrap();
+    pending.mark_sent();
+    let persisted = loop {
+        let item = stream.next().await.unwrap().unwrap();
+        state.apply(item);
+        let found = state
+            .projection
+            .as_ref()
+            .unwrap()
+            .turn_items
+            .iter()
+            .find(|item| item.str("messageId") == command["messageId"].as_str());
+        if let Some(item) = found {
+            let attachments: Vec<attachments::Attachment> =
+                serde_json::from_value(item.fields["attachments"].clone()).unwrap();
+            break attachments.into_iter().next().unwrap();
+        }
+    };
+    assert_ne!(
+        persisted.id, pending.attachment.id,
+        "server claims the pending upload into the thread"
+    );
+    assert_eq!(persisted.name, "notes.txt");
+    assert_eq!(transfer.download(client, &persisted).await.unwrap(), bytes);
+    drop(pending);
+    assert_eq!(
+        transfer.download(client, &persisted).await.unwrap(),
+        bytes,
+        "dropping the sent draft cannot delete a persisted attachment"
+    );
+    assert!(state.timeline().iter().any(|row| matches!(&row.content, t3_client::thread::TimelineContent::Message { attachments, .. } if attachments.iter().any(|attachment| attachment.id == persisted.id))));
+    drop(stream);
+    t3_client::commands::dispatch(client, &t3_client::commands::stop_thread("history-fixture"))
+        .await
+        .unwrap();
+
+    let invalid = transfer
+        .upload(
+            client,
+            Metadata {
+                kind: "image",
+                name: "too-large.png".into(),
+                mime_type: "image/png".into(),
+                size_bytes: attachments::MAX_IMAGE_BYTES + 1,
+            },
+            vec![],
+        )
+        .await;
+    assert!(invalid.is_err());
+    let pending = transfer
+        .upload(
+            client,
+            attachments::metadata("retry.txt", bytes.len() as u64).unwrap(),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+    let (_, launch) = t3_client::commands::launch_thread(&t3_client::commands::NewThread {
+        project_id: "project-that-does-not-exist",
+        model_selection: &json!({"instanceId":"codex", "model":"gpt-6-astra"}),
+        runtime_mode: "approval-required",
+        interaction_mode: "plan",
+        text: "",
+        attachments: std::slice::from_ref(&pending.attachment),
+    });
+    assert!(
+        client
+            .call::<_, Value>(t3_client::commands::LAUNCH_THREAD, &launch)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        transfer
+            .download(client, &pending.attachment)
+            .await
+            .unwrap(),
+        bytes,
+        "a rejected launch preserves the upload for retry"
+    );
+    pending.discard().await.unwrap();
+    let path = home.join("empty.txt");
+    std::fs::write(&path, "").unwrap();
+    assert!(attachments::read_file(&path).is_err());
+}
+
+async fn verifies_checkpoint_review(client: &RpcClient, cwd: &std::path::Path) {
+    use t3_client::checkpoint::{self, Diff};
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input("history-fixture", None),
+    );
+    let mut thread = ThreadState::default();
+    while let Some(item) = stream.next().await {
+        thread.apply(item.unwrap());
+        if thread.synchronized {
+            break;
+        }
+    }
+    let turns = checkpoint::turns(&thread.projection.as_ref().unwrap().checkpoints);
+    assert_eq!(
+        turns.iter().map(|turn| turn.count).collect::<Vec<_>>(),
+        [2, 1]
+    );
+    let mut state = t3_client::review::State::new(true);
+    // This RPC addresses the checkpoint's persisted environment-side scope, without a client cwd.
+    let request = state.checkpoint_request("history-fixture", &turns[0]);
+    let latest: Diff = client
+        .call(checkpoint::TURN_DIFF, &request.input)
+        .await
+        .unwrap();
+    assert!(latest.matches(&request.input));
+    assert!(latest.diff.contains("first checkpoint"));
+    assert!(latest.diff.contains("second checkpoint"));
+    assert!(latest.diff.contains("rename from helper.rs"));
+    assert!(latest.diff.contains("Binary files"));
+    assert!(!latest.diff.contains("live uncaptured edit"));
+    assert!(!latest.diff.contains("spacing.rs"));
+    assert!(!latest.truncated());
+    state.ignore_whitespace = false;
+    let whitespace_request = state.checkpoint_request("history-fixture", &turns[0]);
+    assert!(!state.accepts(&request));
+    let whitespace: Diff = client
+        .call(checkpoint::TURN_DIFF, &whitespace_request.input)
+        .await
+        .unwrap();
+    assert!(whitespace.diff.contains("spacing.rs"));
+    assert_ne!(whitespace.hash(), latest.hash());
+    let first_request = state.checkpoint_request("history-fixture", &turns[1]);
+    let first: Diff = client
+        .call(checkpoint::TURN_DIFF, &first_request.input)
+        .await
+        .unwrap();
+    assert!(first.diff.contains("before checkpoint"));
+    assert!(first.diff.contains("first checkpoint"));
+    assert!(!first.diff.contains("second checkpoint"));
+
+    let refs: Value =
+        serde_json::from_slice(&std::fs::read(cwd.join("refs.json")).unwrap()).unwrap();
+    let latest_ref = refs["refs"][2].as_str().unwrap();
+    fixture_git(cwd, &["update-ref", "-d", latest_ref]).await;
+    let missing = client
+        .call::<_, Diff>(checkpoint::TURN_DIFF, &request.input)
+        .await
+        .unwrap_err();
+    assert_eq!(missing.failure_tag(), Some("OrchestrationGetTurnDiffError"));
+    fixture_git(
+        cwd,
+        &[
+            "update-ref",
+            latest_ref,
+            refs["commits"][2].as_str().unwrap(),
+        ],
+    )
+    .await;
+    let restored: Diff = client
+        .call(checkpoint::TURN_DIFF, &request.input)
+        .await
+        .unwrap();
+    assert_eq!(restored.diff, latest.diff);
+    drop(stream);
+}
+
+async fn fixture_git(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = tokio::process::Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", cwd.join(".fixture-gitconfig"))
+        .args([
+            "-c",
+            "user.name=T3 fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+async fn prepare_review_workspace(cwd: &std::path::Path) {
+    std::fs::create_dir_all(cwd).unwrap();
+    std::fs::write(cwd.join(".fixture-gitconfig"), "").unwrap();
+    std::fs::write(cwd.join(".gitignore"), ".fixture-gitconfig\n").unwrap();
+    std::fs::write(
+        cwd.join("app.rs"),
+        "fn main() {\n    println!(\"before\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(cwd.join("spacing.rs"), "let value=1;\n").unwrap();
+    std::fs::write(cwd.join("notes.md"), "Project notes\n").unwrap();
+    std::fs::write(cwd.join("asset.bin"), [0, 1, 2, 3]).unwrap();
+    fixture_git(cwd, &["init", "--initial-branch=gpui"]).await;
+    fixture_git(cwd, &["add", "."]).await;
+    fixture_git(cwd, &["commit", "-m", "Initial fixture"]).await;
+    fixture_git(cwd, &["switch", "-c", "review-fixture"]).await;
+    fixture_git(
+        cwd,
+        &[
+            "config",
+            "branch.review-fixture.t3-merge-base-ref",
+            "refs/heads/gpui",
+        ],
+    )
+    .await;
+    std::fs::write(cwd.join("committed.md"), "A committed branch change.\n").unwrap();
+    fixture_git(cwd, &["add", "committed.md"]).await;
+    fixture_git(cwd, &["commit", "-m", "Branch change"]).await;
+    std::fs::write(
+        cwd.join("app.rs"),
+        "fn main() {\n    println!(\"after\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(cwd.join("spacing.rs"), "let value = 1;\n").unwrap();
+    std::fs::write(cwd.join("asset.bin"), [0, 4, 5, 6]).unwrap();
+    std::fs::write(cwd.join("new file.rs"), "pub fn added() {}\n").unwrap();
+    std::fs::write(
+        cwd.join("staged.md"),
+        "Staged changes are also uncommitted.\n",
+    )
+    .unwrap();
+    fixture_git(cwd, &["mv", "notes.md", "guide.md"]).await;
+    fixture_git(cwd, &["add", "staged.md"]).await;
+}
+
+async fn verifies_review(client: &RpcClient, cwd: &std::path::Path) {
+    use t3_client::review::{self, Preview, Scope};
+    let index_before = fixture_git(cwd, &["diff", "--cached", "--binary"]).await;
+    let mut state = review::State::new(true);
+    state.set_workspace(Some(cwd.to_string_lossy().into_owned()));
+    let request = state.preview_request().unwrap();
+    let preview: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    assert!(state.apply(&request, preview));
+    assert!(state.source().unwrap().diff.contains("committed.md"));
+    state.select_scope(Scope::Uncommitted);
+    let dirty = state.source().unwrap();
+    assert!(!dirty.diff.contains("committed.md"));
+    assert!(dirty.diff.contains("println!(\"after\")"));
+    assert!(
+        !dirty
+            .files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|file| file.path == "spacing.rs")
+    );
+    let renamed = dirty
+        .files
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|file| file.path == "guide.md")
+        .unwrap();
+    assert_eq!(renamed.previous_path.as_deref(), Some("notes.md"));
+    assert!(
+        dirty
+            .files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|file| file.path == "new file.rs")
+    );
+    assert!(dirty.diff.contains("Binary files"));
+    assert!(dirty.diff.contains("staged.md"));
+    state.select_file(Some("guide.md".into()));
+    let file = state.file_request().unwrap();
+    let renamed: Preview = client.call(review::PREVIEW, &file.input).await.unwrap();
+    let patch = &renamed
+        .sources
+        .iter()
+        .find(|source| source.kind == Scope::Uncommitted.kind())
+        .unwrap()
+        .diff;
+    assert!(patch.contains("rename from notes.md"));
+    assert!(!patch.contains("app.rs"));
+    state.ignore_whitespace = false;
+    let request = state.preview_request().unwrap();
+    let whitespace: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    state.apply(&request, whitespace);
+    assert!(
+        state
+            .source()
+            .unwrap()
+            .files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|file| file.path == "spacing.rs")
+    );
+    let large = format!("{}\nlast_line_sentinel\n", "large line\n".repeat(20000));
+    std::fs::write(cwd.join("large.txt"), large).unwrap();
+    let request = state.preview_request().unwrap();
+    let overview: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    state.apply(&request, overview);
+    assert!(state.source().unwrap().truncated);
+    state.select_file(Some("large.txt".into()));
+    let request = state.file_request().unwrap();
+    let file: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    let source = file
+        .sources
+        .iter()
+        .find(|source| source.kind == Scope::Uncommitted.kind())
+        .unwrap();
+    assert!(!source.truncated);
+    assert!(source.diff.contains("last_line_sentinel"));
+    std::fs::write(cwd.join("oversize.txt"), "oversize line\n".repeat(100000)).unwrap();
+    let request = state.preview_request().unwrap();
+    let overview: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    state.apply(&request, overview);
+    state.select_file(Some("oversize.txt".into()));
+    let request = state.file_request().unwrap();
+    let file: Preview = client.call(review::PREVIEW, &request.input).await.unwrap();
+    assert!(
+        file.sources
+            .iter()
+            .find(|source| source.kind == Scope::Uncommitted.kind())
+            .unwrap()
+            .truncated
+    );
+    assert_eq!(
+        fixture_git(cwd, &["diff", "--cached", "--binary"]).await,
+        index_before,
+        "review must not change the Git index"
+    );
+}
+
+async fn verifies_progressive_history(
+    client: &RpcClient,
+    http: &reqwest::Client,
+    base: &url::Url,
+    access_token: &str,
+) {
+    let mut updates = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input("history-fixture", None),
+    );
+    let mut state = ThreadState::default();
+    while !state.synchronized {
+        state.apply(updates.next().await.unwrap().unwrap());
+    }
+    let initial = state.timeline().len();
+    assert!(initial > 0 && initial < 70);
+    assert!(state.partial);
+    let sequence = state.sequence;
+    let history =
+        t3_client::history::HistoryClient::new(http.clone(), base.clone(), access_token.into());
+    verifies_thread_find(client, &history, &state).await;
+    let mut pages = 0;
+    while let Some(request) = state.history_request() {
+        let page = history
+            .page("history-fixture", &request.cursor)
+            .await
+            .unwrap();
+        assert_eq!(page.snapshot_sequence, sequence.unwrap());
+        assert!(state.apply_history(&request, page));
+        pages += 1;
+        assert!(pages < 10, "history must make progress");
+    }
+    assert!(pages >= 2, "exercise multiple opaque cursors");
+    assert_eq!(state.sequence, sequence, "history never skips live events");
+    assert_eq!(state.timeline().len(), 70);
+    assert_eq!(state.timeline().first().unwrap().id, "user_message-1");
+    assert_eq!(state.timeline().last().unwrap().id, "assistant_message-35");
+    assert!(!state.partial);
+    assert!(matches!(
+        history.page("history-fixture", "invalid cursor").await,
+        Err(t3_client::history::HistoryError::Status(400))
+    ));
+    let unauthenticated =
+        t3_client::history::HistoryClient::new(http.clone(), base.clone(), "invalid".into());
+    assert!(matches!(
+        unauthenticated
+            .page("history-fixture", "invalid cursor")
+            .await,
+        Err(t3_client::history::HistoryError::Status(401))
+    ));
+}
+
+async fn verifies_thread_find(
+    client: &RpcClient,
+    history: &t3_client::history::HistoryClient,
+    recent: &ThreadState,
+) {
+    use t3_client::find::{self, SearchResult};
+    let mut search = find::State::default();
+    search.set_query("NEEDLE");
+    let first = search.begin(0).unwrap();
+    let result: SearchResult = client
+        .call(find::SEARCH, &first.input("history-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.total_matches, 2,
+        "search rendered text, excluding link destinations"
+    );
+    assert_eq!(result.snapshot_sequence, recent.sequence.unwrap());
+    let selected = result.selected.as_ref().unwrap();
+    assert_eq!(selected.entry_id, "assistant_message-1");
+    assert_eq!(selected.occurrence, 0);
+    assert!(
+        !recent
+            .timeline()
+            .iter()
+            .any(|entry| entry.id == selected.entry_id)
+    );
+    let cursor = recent.history_request().unwrap().cursor;
+    let targeted = history
+        .page_through("history-fixture", &cursor, Some(&selected.entry_id))
+        .await
+        .unwrap();
+    assert!(
+        targeted
+            .items
+            .iter()
+            .any(|row| row.source_item_id == selected.entry_id)
+    );
+    search.apply(&first, result);
+    let next = search.begin(1).unwrap();
+    let second: SearchResult = client
+        .call(find::SEARCH, &next.input("history-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(second.active_index, 1);
+    assert_eq!(second.selected.as_ref().unwrap().occurrence, 1);
+    search.apply(&next, second);
+    let wrap = search.begin(1).unwrap();
+    let wrapped: SearchResult = client
+        .call(find::SEARCH, &wrap.input("history-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(wrapped.active_index, 0);
+    search.apply(&wrap, wrapped);
+    let previous = search.begin(-1).unwrap();
+    let mut stream = client
+        .subscribe::<_, SearchResult>(find::SEARCH_STREAM, &previous.input("history-fixture"));
+    let mut complete = false;
+    while let Some(result) = stream.next().await {
+        let result = result.unwrap();
+        if result.complete != Some(false) {
+            assert_eq!(result.total_matches, 2);
+            assert_eq!(result.active_index, 1);
+            complete = true;
+        }
+    }
+    assert!(complete);
+    let no_matches: SearchResult = client
+        .call(
+            find::SEARCH,
+            &json!({"threadId":"history-fixture","query":"absent query"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_matches.total_matches, 0);
+    assert!(no_matches.selected.is_none());
+}
+
+async fn verifies_project_lifecycle(client: &RpcClient, home: &std::path::Path) {
+    let config = projects::config(client).await.unwrap();
+    assert!(!config.platform.is_empty());
+    assert!(config.new_projects_root.is_some());
+    let folder = home.join("folder-fixture");
+    std::fs::create_dir_all(folder.join("child")).unwrap();
+    std::fs::create_dir_all(folder.join(".hidden")).unwrap();
+    std::fs::write(folder.join("file.txt"), "keep me").unwrap();
+    let folders = projects::browse(
+        client,
+        &projects::directory(&folder.to_string_lossy()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        folders
+            .entries
+            .iter()
+            .map(|folder| folder.name.as_str())
+            .collect::<Vec<_>>(),
+        [".hidden", "child"]
+    );
+
+    let mut updates =
+        client.subscribe::<_, ShellStreamItem>(t3_client::shell::SUBSCRIBE, &json!({}));
+    let mut shell = ShellState::default();
+    shell.apply(updates.next().await.unwrap().unwrap());
+    let registered = projects::add(client, &folder.to_string_lossy())
+        .await
+        .unwrap();
+    assert_eq!(registered.title, "folder-fixture");
+    while shell.project(&registered.id).is_none() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    let duplicate = projects::add(client, &folder.to_string_lossy())
+        .await
+        .unwrap_err();
+    assert!(matches!(duplicate, RpcError::Failure(_)), "{duplicate:?}");
+    projects::remove(client, &registered.id).await.unwrap();
+    while shell.project(&registered.id).is_some() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert_eq!(
+        std::fs::read_to_string(folder.join("file.txt")).unwrap(),
+        "keep me"
+    );
+
+    let created = projects::create(client, "Native project").await.unwrap();
+    while shell.project(&created.project_id).is_none() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert_eq!(
+        shell.project(&created.project_id).unwrap().title,
+        "Native project"
+    );
+    let root = PathBuf::from(&created.workspace_root);
+    assert!(root.join(".git").is_dir());
+    assert!(root.join("README.md").is_file());
+    projects::remove(client, &created.project_id).await.unwrap();
+    while shell.project(&created.project_id).is_some() {
+        shell.apply(updates.next().await.unwrap().unwrap());
+    }
+    assert!(root.join("README.md").is_file());
+}
+
+async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
+    use t3_client::thread_actions::Action;
+    let mut updates =
+        client.subscribe::<_, ShellStreamItem>(t3_client::shell::SUBSCRIBE, &json!({}));
+    let mut archive_updates = client.subscribe::<_, t3_client::archives::StreamItem>(
+        t3_client::archives::SUBSCRIBE,
+        &json!({}),
+    );
+    let mut archive = t3_client::archives::State::default();
+    archive.apply(archive_updates.next().await.unwrap().unwrap());
+    let mut shell = ShellState::default();
+    shell.apply(updates.next().await.unwrap().unwrap());
+    for action in [
+        Action::Rename("Renamed native thread".into()),
+        Action::Pin,
+        Action::Unpin,
+        Action::Settle,
+        Action::Unsettle,
+        Action::Archive,
+        Action::Rename("Renamed archived thread".into()),
+        Action::Restore,
+        Action::Archive,
+        Action::Delete,
+    ] {
+        t3_client::commands::dispatch(client, &action.command(id))
+            .await
+            .unwrap();
+        loop {
+            tokio::select! {
+                item = updates.next() => { shell.apply(item.unwrap().unwrap()); },
+                item = archive_updates.next() => { archive.apply(item.unwrap().unwrap()); },
+            }
+            let active = shell.threads.get(id);
+            let archived = archive.threads.get(id);
+            let applied = match &action {
+                Action::Rename(title) => active
+                    .or(archived)
+                    .is_some_and(|thread| thread.title == *title),
+                Action::Pin => active.is_some_and(|thread| thread.pinned_at.is_some()),
+                Action::Unpin => active.is_some_and(|thread| thread.pinned_at.is_none()),
+                Action::Settle => active
+                    .is_some_and(|thread| thread.settled_override.as_deref() == Some("settled")),
+                Action::Unsettle => active
+                    .is_some_and(|thread| thread.settled_override.as_deref() == Some("active")),
+                Action::Archive => active.is_none() && archived.is_some(),
+                Action::Restore => active.is_some() && archived.is_none(),
+                Action::Delete => active.is_none() && archived.is_none(),
+            };
+            if applied {
+                break;
+            }
+        }
+    }
+}
+
+async fn verifies_tool_detail(client: &RpcClient, http: &reqwest::Client, base: &url::Url) {
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        "orchestration.subscribeThread",
+        &json!({"threadId":"output-fixture"}),
+    );
+    let ThreadStreamItem::Snapshot { projection, .. } = stream.next().await.unwrap().unwrap()
+    else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(projection.visible_turn_items.len(), 15);
+    for row in &projection.visible_turn_items {
+        if row.item.kind == "notification" {
+            let entry = t3_client::thread::timeline_entries(&projection)
+                .into_iter()
+                .find(|entry| entry.id == row.item.id)
+                .unwrap();
+            let t3_client::thread::TimelineContent::Work { label, detail, .. } = entry.content
+            else {
+                panic!("expected notice");
+            };
+            match row.item.id.as_str() {
+                "notice-detail" => {
+                    assert_eq!(label, "Background task finished");
+                    assert_eq!(
+                        detail.as_deref(),
+                        Some(
+                            "café — background task finished.\nSecond line with <b>literal text</b>.\nKeep the existing Node protocol."
+                        )
+                    );
+                }
+                "notice-empty" | "notice-summary" => assert_eq!(detail, None),
+                _ => panic!("unexpected notification"),
+            }
+            continue;
+        }
+        let source = t3_client::tool_detail::source(row).unwrap();
+        if source.request.kind == t3_client::tool_detail::Kind::FileChange {
+            assert!(!source.omitted, "file metadata is already in the stream");
+            assert!(row.item.str("oldStr").is_none());
+            assert!(row.item.str("newStr").is_none());
+            match row.item.id.as_str() {
+                "changed-files" => {
+                    assert!(
+                        row.item.str("diffStr").is_none(),
+                        "successful patch payloads stay omitted"
+                    );
+                    assert_eq!(
+                        source.output.as_deref(),
+                        Some("update src/café.rs\nrename old.rs → new.rs\n\nLines: +3 -1")
+                    );
+                }
+                "failed-edit" => assert_eq!(
+                    source.output.as_deref(),
+                    Some("example.rs\n\nAttempted patch\n@@ -1 +1 @@\n-old\n+new")
+                ),
+                _ => panic!("unexpected file change"),
+            }
+            continue;
+        }
+        if source.request.kind.is_search() {
+            assert!(!source.omitted, "search results are already in the stream");
+            match row.item.id.as_str() {
+                "file-results" => assert_eq!(
+                    source.output.as_deref(),
+                    Some("src/café.rs:12\nfirst match\n  continuation\n\nother.rs")
+                ),
+                "web-results" => assert_eq!(
+                    source.output.as_deref(),
+                    Some(
+                        "GPUI reference\nhttps://example.com/gpui\nNative rendering reference.\n\nhttps://example.com/related"
+                    )
+                ),
+                "empty-search" => {
+                    assert_eq!(source.output, None);
+                    assert_ne!(source.request.revision, "live");
+                }
+                "pending-search" => {
+                    assert_eq!(source.output, None);
+                    assert_eq!(source.request.revision, "live");
+                }
+                _ => panic!("unexpected search"),
+            }
+            continue;
+        }
+        assert_eq!(source.omitted, row.item.id != "empty-command");
+        assert!(source.output.is_none(), "wire output must remain omitted");
+        let response: t3_client::tool_detail::Response = client
+            .call(t3_client::tool_detail::GET, &source.request)
+            .await
+            .unwrap();
+        let item = response.item.unwrap();
+        assert!(source.request.accepts(&item));
+        let output = t3_client::tool_detail::output(&item);
+        match item.id.as_str() {
+            "output-command" => assert_eq!(
+                output.unwrap(),
+                format!("café\n{}", "output line\n".repeat(400))
+            ),
+            "empty-command" => assert_eq!(output, None),
+            "failed-command" => assert_eq!(output.as_deref(), Some("command failed")),
+            "text-tool" => {
+                assert_eq!(
+                    source.input, None,
+                    "large arguments must be summarized on the wire"
+                );
+                assert_eq!(item.fields["input"]["payload"], "argument ".repeat(4000));
+                assert_eq!(
+                    output.as_deref(),
+                    Some("<b>literal tool output</b>\nSecond line.")
+                );
+            }
+            "structured-tool" => {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&output.unwrap()).unwrap(),
+                    json!({"result":{"count":0,"ok":true}})
+                );
+                assert_eq!(
+                    serde_json::from_str::<Value>(&source.input.unwrap()).unwrap(),
+                    json!({"enabled":false,"count":0,"clear":null})
+                );
+            }
+            "image-tool" => {
+                assert!(
+                    source.images.is_empty(),
+                    "images stay out of the wire summary"
+                );
+                assert_eq!(output.as_deref(), Some("Two tool images."));
+                let images = t3_client::tool_images::images(
+                    &item,
+                    &source.request.thread_id,
+                    &source.request.item_id,
+                );
+                assert_eq!(images.len(), 2);
+                let transfer = t3_client::attachments::Client::new(http.clone(), base.clone());
+                let first = transfer
+                    .download_tool_image(client, &images[0])
+                    .await
+                    .unwrap();
+                let second = transfer
+                    .download_tool_image(client, &images[1])
+                    .await
+                    .unwrap();
+                assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
+                assert_eq!(&second[..8], b"\x89PNG\r\n\x1a\n");
+                assert_ne!(first, second, "each asset index resolves its own image");
+                let mut missing = images[0].clone();
+                missing.index = 2;
+                assert!(
+                    transfer
+                        .download_tool_image(client, &missing)
+                        .await
+                        .is_err()
+                );
+            }
+            _ => panic!("unexpected tool item"),
+        }
+    }
+    let missing: t3_client::tool_detail::Response = client
+        .call(
+            t3_client::tool_detail::GET,
+            &json!({"threadId":"output-fixture","itemId":"missing"}),
+        )
+        .await
+        .unwrap();
+    assert!(missing.item.is_none());
+}
+
+async fn verifies_tasks(client: &RpcClient) {
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        "orchestration.subscribeThread",
+        &json!({"threadId":"tasks-fixture"}),
+    );
+    let ThreadStreamItem::Snapshot { projection, .. } = stream.next().await.unwrap().unwrap()
+    else {
+        panic!("expected snapshot");
+    };
+    let tasks = t3_client::tasks::select(&projection, None, Some("tasks-run")).unwrap();
+    assert!(!tasks.live, "unfinished Claude tasks survive a settled run");
+    assert_eq!(tasks.completed(), 1);
+    assert_eq!(tasks.steps.len(), 3);
+    assert_eq!(tasks.current(), "Implement native task progress");
+    assert_eq!(tasks.steps[0].duration_ms, Some(1234));
+}

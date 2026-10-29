@@ -1,0 +1,348 @@
+// Executed with node --eval from apps/server so its dependencies resolve there.
+// Persist stopped conversations through the real stores without starting provider turns.
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Sqlite from "./src/persistence/Sqlite.ts";
+import * as Events from "./src/orchestration-v2/EventStore.ts";
+import * as Projections from "./src/orchestration-v2/ProjectionStore.ts";
+import * as Projects from "./src/orchestration-v2/ProjectStore.ts";
+
+const dbPath = process.argv[1];
+const workspaceRoot = process.argv[2];
+const threadId = "history-fixture";
+const projectId = "history-project";
+const now = DateTime.makeUnsafe("2026-10-24T10:00:00.000Z");
+const layer = Layer.mergeAll(Events.layer, Projections.layer, Projects.layer).pipe(
+  Layer.provide(Sqlite.layerFromPath(dbPath)),
+  Layer.provide(NodeServices.layer),
+);
+await Effect.runPromise(
+  Effect.gen(function* () {
+    const projects = yield* Projects.ProjectStoreV2;
+    yield* projects.apply({
+      sequence: 0,
+      eventId: "history-project-created",
+      aggregateKind: "project",
+      aggregateId: projectId,
+      occurredAt: DateTime.formatIso(now),
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "project.created",
+      payload: {
+        projectId,
+        title: "History fixture",
+        workspaceRoot,
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: DateTime.formatIso(now),
+        updatedAt: DateTime.formatIso(now),
+      },
+    });
+    const events = [
+      {
+        id: "history-thread-created",
+        type: "thread.created",
+        threadId,
+        providerInstanceId: "codex",
+        occurredAt: now,
+        payload: {
+          id: threadId,
+          projectId,
+          createdBy: "user",
+          creationSource: "web",
+          title: "Long conversation",
+          providerInstanceId: "codex",
+          modelSelection: { instanceId: "codex", model: "gpt-6-astra" },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      },
+    ];
+    for (let turn = 1; turn <= 35; turn++) {
+      for (const type of ["user_message", "assistant_message"]) {
+        const id = `${type}-${turn}`;
+        events.push({
+          id: `event-${id}`,
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id,
+            threadId,
+            type,
+            messageId: id,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: turn * 2 - (type === "user_message" ? 1 : 0),
+            status: "completed",
+            title: null,
+            text:
+              type === "user_message"
+                ? `Question ${turn}`
+                : turn === 1
+                  ? "Answer 1. First **needle** and second needle.\n\n[Reference](https://hidden.example/needle)"
+                  : `Answer ${turn}. This message is stored on the existing Node server.`,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            ...(type === "user_message"
+              ? {
+                  inputIntent: "turn_start",
+                  attachments: [],
+                  createdBy: "user",
+                  creationSource: "web",
+                }
+              : { streaming: false }),
+          },
+        });
+        const item = events.at(-1).payload;
+        events.push({
+          id: `message-${id}`,
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id,
+            threadId,
+            runId: null,
+            nodeId: null,
+            role: type === "user_message" ? "user" : "assistant",
+            text: item.text,
+            attachments: [],
+            streaming: false,
+            createdBy: type === "user_message" ? "user" : "agent",
+            creationSource: type === "user_message" ? "web" : "provider",
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+    }
+    const outputThread = "output-fixture";
+    events.push({
+      ...events[0],
+      id: "output-thread-created",
+      threadId: outputThread,
+      payload: { ...events[0].payload, id: outputThread, title: "Command output fixture" },
+    });
+    for (const [id, input, output, exitCode] of [
+      ["output-command", "printf 'café\\n'", "café\n" + "output line\n".repeat(400), 0],
+      ["empty-command", "true", "", 0],
+      ["failed-command", "false", '{"stdout":"","stderr":"command failed","interrupted":false}', 1],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          id,
+          threadId: outputThread,
+          type: "command_execution",
+          ordinal: events.length,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          status: "completed",
+          title: null,
+          input,
+          output,
+          exitCode,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    }
+    const imageData =
+      "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAlElEQVR4nO3YwQnAIBQFQRtKV6nYNlJEUoJILisMvPOic/zjuufW5vNu7fT+OP0DgAC1+4AAAQIEKNwHBAgQIEDhPiBAP4FqD6r1AQECBAhQuA8IECBAgMJ9QIAAAQIU7juYLQYIECBAgMJ9QIAAAQIU7gMCBAgQoHDfwWwxQIAAAQIU7gMCBAgQoHAfECBAgACF+x+jM3bg2LiAwwAAAABJRU5ErkJggg==";
+    const secondImageData =
+      "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAlklEQVR4nO3YsQmAMBRF0Uxi4ySu4XQuae8IIdjcwIFXX5JT/vE+59KO617a7v2x+wcAAWr3AQECBAhQuA8IECBAgMJ9QIB+AtUeVOsDAgQIEKBwHxAgQIAAhfuAAAECBCjcdzCbDBAgQIAAhfuAAAECBCjcBwQIECBA4b6D2WSAAAECBCjcBwQIECBA4T4gQIAAAQr3P9eCTbQdRoXrAAAAAElFTkSuQmCC";
+    const toolBase = events.at(-1).payload;
+    for (const [id, input, output] of [
+      [
+        "text-tool",
+        { query: "café", payload: "argument ".repeat(4000) },
+        {
+          content: [{ type: "text", text: "<b>literal tool output</b>\nSecond line." }],
+          isError: false,
+        },
+      ],
+      [
+        "image-tool",
+        {},
+        {
+          content: [
+            { type: "text", text: "Two tool images." },
+            { type: "image", mimeType: "image/png", data: imageData },
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: secondImageData },
+            },
+          ],
+        },
+      ],
+      [
+        "structured-tool",
+        { enabled: false, count: 0, clear: null },
+        { result: { count: 0, ok: true } },
+      ],
+    ]) {
+      const { exitCode: _exitCode, ...base } = toolBase;
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...base,
+          id,
+          type: "dynamic_tool",
+          ordinal: events.length,
+          toolName: id,
+          input,
+          output,
+        },
+      });
+    }
+    const { input: _input, output: _output, exitCode: _exitCode, ...searchBase } = toolBase;
+    for (const [type, id, fields, status] of [
+      [
+        "file_search",
+        "file-results",
+        {
+          pattern: "native",
+          results: [
+            {
+              fileName: "src/café.rs",
+              line: 12,
+              column: 4,
+              preview: "first match\n  continuation",
+            },
+            { fileName: "other.rs" },
+          ],
+        },
+      ],
+      [
+        "web_search",
+        "web-results",
+        {
+          patterns: ["GPUI reference"],
+          results: [
+            {
+              title: "GPUI reference",
+              url: "https://example.com/gpui",
+              snippet: "Native rendering reference.",
+            },
+            { url: "https://example.com/related" },
+          ],
+        },
+      ],
+      ["web_search", "empty-search", { patterns: ["missing"], results: [] }],
+      ["file_search", "pending-search", { pattern: "in progress", results: [] }, "running"],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...searchBase,
+          id,
+          type,
+          ordinal: events.length,
+          status: status ?? "completed",
+          ...fields,
+        },
+      });
+    }
+    for (const [id, fields, status] of [
+      [
+        "changed-files",
+        {
+          fileName: "src/café.rs",
+          additions: 3,
+          deletions: 1,
+          changes: [
+            { operation: "update", path: "src/café.rs" },
+            { operation: "rename", oldPath: "old.rs", path: "new.rs" },
+          ],
+          oldStr: "old hidden",
+          newStr: "new hidden",
+          diffStr: "successful patch stays out of the wire",
+        },
+        "completed",
+      ],
+      ["failed-edit", { fileName: "example.rs", diffStr: "@@ -1 +1 @@\n-old\n+new" }, "failed"],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...searchBase,
+          id,
+          type: "file_change",
+          ordinal: events.length,
+          status,
+          ...fields,
+        },
+      });
+    }
+    for (const [id, summary, detail] of [
+      [
+        "notice-detail",
+        "Background task finished",
+        "café — background task finished.\nSecond line with <b>literal text</b>.\nKeep the existing Node protocol.",
+      ],
+      ["notice-empty", "Empty-detail notification", " \n"],
+      ["notice-summary", "Summary-only notification", undefined],
+    ]) {
+      events.push({
+        id: `event-${id}`,
+        type: "turn-item.updated",
+        threadId: outputThread,
+        occurredAt: now,
+        payload: {
+          ...searchBase,
+          id,
+          type: "notification",
+          ordinal: events.length,
+          status: "completed",
+          source: { kind: "background_task" },
+          outcome: "completed",
+          summary,
+          ...(detail === undefined ? {} : { detail }),
+        },
+      });
+    }
+    const store = yield* Events.EventStoreV2;
+    const projection = yield* Projections.ProjectionStoreV2;
+    yield* store.append({ events });
+    yield* Effect.forEach(events, projection.apply, { discard: true });
+  }).pipe(Effect.provide(layer)),
+);
