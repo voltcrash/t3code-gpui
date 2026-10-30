@@ -8,8 +8,9 @@ use gpui_kit::*;
 use crate::desktop::{OpenSettings, ResetZoom, ToggleFullscreen, ZoomIn, ZoomOut};
 use crate::environment::LocalEnvironment;
 use crate::workspace::{
-    AddProject, FindInThread, GoBack, GoForward, NewThread, NextThread, PreviousThread,
-    ToggleChanges, TogglePlanMode, ToggleSidebar, ToggleThreadPin, ToggleThreadSettlement,
+    AddProject, FindInThread, GoBack, GoForward, NewThread, NextThread, OpenInEditor,
+    PreviousThread, ToggleChanges, TogglePlanMode, ToggleSidebar, ToggleThreadPin,
+    ToggleThreadSettlement,
 };
 
 #[derive(Clone, PartialEq, Action)]
@@ -31,6 +32,7 @@ pub fn content(
     thread_id: Option<&str>,
     can_plan: bool,
     sidebar_visible: bool,
+    can_open_editor: bool,
 ) -> Command {
     let thread = thread_id.and_then(|id| env.thread(id));
     let can_operate = env.rpc.is_some();
@@ -39,6 +41,14 @@ pub fn content(
         .item(item("New thread", IconName::SquarePen, NewThread))
         .item(item("Add project", IconName::FolderPlus, AddProject))
         .item(item("Settings", IconName::Settings, OpenSettings))
+        .item(
+            item(
+                "Open in editor",
+                IconName::SquareArrowOutUpRight,
+                OpenInEditor,
+            )
+            .disabled(!can_open_editor),
+        )
         .item(
             item("Find in thread", IconName::Search, FindInThread)
                 .disabled(thread.is_none() || !can_operate || !env.server.thread_find),

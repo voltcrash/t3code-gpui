@@ -7,8 +7,8 @@ use t3_host::BackendLaunch;
 
 use crate::environment::LocalEnvironment;
 use crate::workspace::{
-    FindInThread, GoBack, GoForward, NewThread, ToggleChanges, ToggleCommandPalette, ToggleSidebar,
-    Workspace,
+    FindInThread, GoBack, GoForward, NewThread, OpenInEditor, ToggleChanges, ToggleCommandPalette,
+    ToggleSidebar, Workspace,
 };
 
 actions!(
@@ -175,7 +175,10 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Quit T3 Code", Quit),
         ]));
     }
-    let mut file_items = vec![MenuItem::action("New Thread", NewThread)];
+    let mut file_items = vec![
+        MenuItem::action("New Thread", NewThread),
+        MenuItem::action("Open in Editor", OpenInEditor),
+    ];
     if !cfg!(target_os = "macos") {
         file_items.extend([
             MenuItem::action("Settings...", OpenSettings),

@@ -38,6 +38,7 @@ actions!(
     [
         NewThread,
         AddProject,
+        OpenInEditor,
         ToggleCommandPalette,
         CloseCommandPalette,
         FindInThread,
@@ -89,6 +90,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-o", OpenInEditor, Some(CONTEXT)),
         KeyBinding::new("secondary-[", GoBack, Some(CONTEXT)),
         KeyBinding::new("secondary-]", GoForward, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
@@ -132,6 +134,7 @@ pub struct Workspace {
     palette_return_focus: Option<FocusHandle>,
     navigation: t3_client::navigation::History,
     zoom: f32,
+    opening_editor: bool,
     menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
     sidebar: Entity<Sidebar>,
@@ -370,6 +373,7 @@ impl Workspace {
                 }
             }),
             cx.observe(&actions, |_, _, cx| cx.notify()),
+            cx.observe(&crate::preferences::global(cx), |_, _, cx| cx.notify()),
             cx.observe_in(&env, window, |this, env, window, cx| {
                 let env = env.read(cx);
                 let missing_draft = this.draft.as_ref().is_some_and(|(draft, _)| {
@@ -417,6 +421,7 @@ impl Workspace {
             palette_return_focus: None,
             navigation: Default::default(),
             zoom: crate::window_state::view(cx).zoom,
+            opening_editor: false,
             menu: AppMenuBar::new(cx),
             env,
             sidebar,
@@ -772,6 +777,80 @@ impl Workspace {
         cx.notify();
     }
 
+    fn editor_cwd(&self, cx: &App) -> Option<String> {
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.pending_project.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return None;
+        }
+        let env = self.env.read(cx);
+        let (project_id, thread) = if let Some((draft, _)) = &self.draft {
+            (draft.read(cx).project_id(), None)
+        } else {
+            let id = self.sidebar.read(cx).selected()?;
+            let thread = env.thread(id)?;
+            (thread.project_id.as_str(), Some(thread))
+        };
+        let project = env.shell.project(project_id)?;
+        t3_client::editors::cwd(project, thread).map(str::to_owned)
+    }
+
+    fn can_open_editor(&self, cx: &App) -> bool {
+        !self.opening_editor
+            && self.env.read(cx).rpc.is_some()
+            && self.editor_cwd(cx).is_some()
+            && crate::editor::ready(&self.env.read(cx).server.editors, cx)
+    }
+
+    fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        if !self.can_open_editor(cx) {
+            return;
+        }
+        let Some(cwd) = self.editor_cwd(cx) else {
+            return;
+        };
+        let env = self.env.read(cx);
+        let Some(rpc) = env.rpc.clone() else { return };
+        let preferences = crate::preferences::global(cx);
+        let Some(editor) = env
+            .server
+            .editors
+            .preferred(preferences.read(cx).value.last_editor.as_deref())
+        else {
+            return;
+        };
+        self.opening_editor = true;
+        let opening = crate::tokio_bridge::spawn(cx, async move {
+            t3_client::editors::open(&rpc, &cwd, editor).await
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let error = match opening.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.detail()),
+                Err(error) => Some(error.to_string()),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.opening_editor = false;
+                if let Some(error) = error {
+                    tracing::warn!(%error, editor = editor.id, "editor launch failed");
+                    window.push_notification(
+                        Notification::new().message(format!(
+                            "Could not open in {}. Check that it is installed and try again.",
+                            editor.label
+                        )),
+                        cx,
+                    );
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn render_main(&self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
         if let Some((settings, _)) = &self.settings {
             return settings.clone().into_any_element();
@@ -812,7 +891,14 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             );
         let header = match (thread, &self.draft) {
-            (_, Some(_)) => header.child(div().text_sm().font_medium().child("New thread")),
+            (_, Some(_)) => header
+                .child(div().text_sm().font_medium().child("New thread"))
+                .child(div().ml_auto().child(crate::editor::picker(
+                    &env.server.editors,
+                    env.rpc.is_some(),
+                    self.opening_editor,
+                    cx,
+                ))),
             (Some(thread), None) => {
                 let project = env
                     .shell
@@ -846,6 +932,12 @@ impl Workspace {
                         h_flex()
                             .ml_auto()
                             .gap_1()
+                            .child(crate::editor::picker(
+                                &env.server.editors,
+                                env.rpc.is_some(),
+                                self.opening_editor,
+                                cx,
+                            ))
                             .child(
                                 Button::new("toggle-changes")
                                     .label("Changes")
@@ -1132,6 +1224,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.travel(false, window, cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.travel(true, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenInEditor, window, cx| this.open_editor(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
@@ -1245,6 +1340,7 @@ impl Render for Workspace {
                     thread_id.as_deref(),
                     can_plan,
                     self.sidebar_visible,
+                    self.can_open_editor(cx),
                 )
                 .on_confirm(move |_, window, cx| {
                     let _ = this.update(cx, |this, cx| this.close_palette(window, cx));
