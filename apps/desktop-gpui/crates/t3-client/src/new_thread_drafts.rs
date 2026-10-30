@@ -10,6 +10,8 @@ use crate::message_drafts;
 pub struct SavedDraft {
     pub project_id: String,
     pub text: String,
+    #[serde(default)]
+    pub picks: message_drafts::Picks,
     pub order: u64,
 }
 
@@ -62,6 +64,7 @@ impl Drafts {
             return false;
         }
         self.messages.edit(id, "");
+        self.messages.set_picks(id, Default::default());
         self.attachments.remove(id);
         self.touched.insert(id.into());
         self.revision += 1;
@@ -74,6 +77,7 @@ impl Drafts {
             project_id,
             order,
             text: self.messages.text(id).into(),
+            picks: self.messages.picks(id).cloned().unwrap_or_default(),
         };
         let has_attachments = self.has_attachments(id);
         self.remove(id).then_some(DiscardedDraft {
@@ -90,6 +94,7 @@ impl Drafts {
         self.sessions
             .insert(id.into(), (saved.project_id.clone(), saved.order));
         self.messages.edit(id, &saved.text);
+        self.messages.set_picks(id, saved.picks.clone());
         if discarded.has_attachments {
             self.attachments.insert(id.into());
         }
@@ -113,8 +118,9 @@ impl Drafts {
     }
 
     pub fn finish(&mut self, id: &str, submission: message_drafts::Submission, accepted: bool) {
+        let unchanged_picks = self.messages.picks_unchanged(&submission);
         self.messages.finish(submission, accepted);
-        if accepted && self.messages.text(id).is_empty() {
+        if accepted && unchanged_picks && self.messages.text(id).is_empty() {
             self.remove(id);
         }
     }
@@ -134,12 +140,14 @@ impl Drafts {
             .iter()
             .filter_map(|(id, (project_id, order))| {
                 let text = self.messages.text(id);
-                (!text.is_empty()).then(|| {
+                let picks = self.messages.picks(id).cloned().unwrap_or_default();
+                (!text.is_empty() || picks != message_drafts::Picks::default()).then(|| {
                     (
                         id.clone(),
                         SavedDraft {
                             project_id: project_id.clone(),
                             text: text.into(),
+                            picks,
                             order: *order,
                         },
                     )
@@ -157,6 +165,7 @@ impl Drafts {
             self.sessions
                 .insert(id.clone(), (draft.project_id.clone(), draft.order));
             self.messages.edit(id, &draft.text);
+            self.messages.set_picks(id, draft.picks.clone());
             self.revision += 1;
         }
     }
@@ -206,6 +215,34 @@ mod tests {
         assert!(!drafts.messages.text(&id).is_empty());
         assert!(drafts.remove(&id));
         assert!(drafts.snapshot().is_empty());
+    }
+
+    #[test]
+    fn choices_without_text_survive_restart_and_discard_undo() {
+        let mut drafts = Drafts::default();
+        let id = drafts.create("project");
+        let picks = message_drafts::Picks {
+            runtime_mode: Some("approval-required".into()),
+            ..Default::default()
+        };
+        drafts.messages.set_picks(&id, picks.clone());
+        let mut restored = Drafts::default();
+        restored.restore_missing(&drafts.snapshot());
+        assert_eq!(restored.messages.picks(&id), Some(&picks));
+        let discarded = drafts.discard(&id).unwrap();
+        assert!(drafts.messages.picks(&id).is_none());
+        drafts.restore_discarded(&id, &discarded);
+        assert_eq!(drafts.messages.picks(&id), Some(&picks));
+        let submission = drafts.messages.begin(&id, true).unwrap();
+        drafts.messages.set_picks(
+            &id,
+            message_drafts::Picks {
+                runtime_mode: Some("auto".into()),
+                ..Default::default()
+            },
+        );
+        drafts.finish(&id, submission, true);
+        assert_eq!(drafts.project(&id), Some("project"));
     }
 
     #[test]

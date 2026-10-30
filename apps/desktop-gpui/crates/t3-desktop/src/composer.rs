@@ -148,6 +148,11 @@ impl Composer {
             .text(target.draft_id())
             .to_owned()
             .into();
+        let picks = target
+            .drafts(env.read(cx))
+            .picks(target.draft_id())
+            .cloned()
+            .unwrap_or_default();
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -186,6 +191,7 @@ impl Composer {
                             this.picked_interaction_mode = None;
                         }
                     }
+                    this.store_picks(cx);
                     cx.notify();
                 }
                 let proposed = thread.read(cx).proposed_plan();
@@ -215,9 +221,9 @@ impl Composer {
             error: None,
             placeholder: PLACEHOLDER,
             thread_settings: None,
-            picked_model: None,
-            picked_runtime_mode: None,
-            picked_interaction_mode: None,
+            picked_model: picks.model,
+            picked_runtime_mode: picks.runtime_mode,
+            picked_interaction_mode: picks.interaction_mode,
             proposed_plan: None,
             _subscriptions: subscriptions,
         };
@@ -232,18 +238,37 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Target::Draft(_) = self.target {
-            if let Target::Draft(previous) = &self.target
-                && previous.project_id != new_thread.project_id
-            {
+        if let Target::Draft(previous) = &self.target {
+            let project_changed = previous.project_id != new_thread.project_id;
+            if project_changed {
                 self.picked_model = None;
                 self.picked_runtime_mode = None;
                 self.picked_interaction_mode = None;
                 self.error = None;
             }
             self.target = Target::Draft(new_thread);
+            if project_changed {
+                self.store_picks(cx);
+            }
             self.sync(window, cx);
         }
+    }
+
+    fn store_picks(&self, cx: &mut Context<Self>) {
+        let picks = t3_client::message_drafts::Picks {
+            model: self.picked_model.clone(),
+            runtime_mode: self.picked_runtime_mode.clone(),
+            interaction_mode: self.picked_interaction_mode.clone(),
+        };
+        self.env.update(cx, |env, cx| {
+            if self
+                .target
+                .drafts_mut(env)
+                .set_picks(self.target.draft_id(), picks)
+            {
+                cx.notify();
+            }
+        });
     }
 
     /// The model and mode a send would use without picks, and whether a
@@ -348,6 +373,7 @@ impl Composer {
             }
             .into(),
         );
+        self.store_picks(cx);
         self.focus(window, cx);
         cx.notify();
         true
@@ -405,6 +431,7 @@ impl Composer {
         } else {
             self.error = None;
             self.picked_model = Some(selection);
+            self.store_picks(cx);
         }
         cx.notify();
     }
@@ -467,7 +494,10 @@ impl Composer {
             .thread_settings
             .as_ref()
             .is_some_and(|settings| settings.started);
-        let base = self.base_settings()?.0;
+        let base = self
+            .base_settings()
+            .map(|settings| settings.0)
+            .unwrap_or_else(|| model.clone());
         let locked_instance = base["instanceId"].as_str().unwrap_or_default();
         let locked_driver = started.then(|| {
             if let Some(driver) = self
@@ -570,6 +600,7 @@ impl Composer {
                                 let mode = mode.clone();
                                 let _ = this.update(cx, |composer, cx| {
                                     composer.picked_runtime_mode = Some(mode);
+                                    composer.store_picks(cx);
                                     cx.notify();
                                 });
                             }),
@@ -657,6 +688,10 @@ impl Composer {
             let id = self.target.draft_id();
             let drafts = self.target.drafts(self.env.read(cx));
             self.busy = drafts.busy(id);
+            let picks = drafts.picks(id).cloned().unwrap_or_default();
+            self.picked_model = picks.model;
+            self.picked_runtime_mode = picks.runtime_mode;
+            self.picked_interaction_mode = picks.interaction_mode;
             let message = drafts.text(id);
             if self.binding.is_some() {
                 if self.stashed_message.as_deref() != Some(message) {
@@ -1082,12 +1117,18 @@ impl Composer {
             }
             // Finish against environment state even if navigation dropped this composer.
             env.update(cx, |env, cx| {
+                let picks_submission = submission.clone();
                 match &target {
                     Target::Thread(_) => env.message_drafts.finish(submission, result.is_ok()),
                     Target::Draft(draft) => {
                         env.new_thread_drafts
                             .finish(&draft.id, submission, result.is_ok())
                     }
+                }
+                if sends_attachments && result.is_ok() {
+                    target
+                        .drafts_mut(env)
+                        .clear_submitted_interaction(&picks_submission);
                 }
                 cx.notify();
             });

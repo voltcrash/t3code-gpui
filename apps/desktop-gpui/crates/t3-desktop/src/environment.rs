@@ -135,6 +135,7 @@ impl LocalEnvironment {
             return;
         }
         saved.threads = self.message_drafts.snapshot();
+        saved.thread_picks = self.message_drafts.picks_snapshot();
         saved.new_threads = self.new_thread_drafts.snapshot();
         match self.draft_store.save(saved) {
             Ok(()) => {
@@ -155,6 +156,8 @@ impl LocalEnvironment {
             match self.draft_store.load() {
                 Ok(saved) => {
                     self.message_drafts.restore_missing(&saved.threads);
+                    self.message_drafts
+                        .restore_picks_missing(&saved.thread_picks);
                     self.new_thread_drafts.restore_missing(&saved.new_threads);
                     self.saved_drafts = Some(saved);
                 }
@@ -174,6 +177,7 @@ impl LocalEnvironment {
         let (saved_drafts, saved_draft_revision, draft_storage_error) = match draft_store.load() {
             Ok(saved) => {
                 message_drafts.restore_missing(&saved.threads);
+                message_drafts.restore_picks_missing(&saved.thread_picks);
                 new_thread_drafts.restore_missing(&saved.new_threads);
                 let revision = (message_drafts.revision(), new_thread_drafts.revision());
                 (Some(saved), Some(revision), None)

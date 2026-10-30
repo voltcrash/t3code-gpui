@@ -12,6 +12,7 @@ use std::{
 #[serde(default)]
 pub struct SavedDrafts {
     pub threads: BTreeMap<String, String>,
+    pub thread_picks: BTreeMap<String, t3_client::message_drafts::Picks>,
     pub new_threads: BTreeMap<String, t3_client::new_thread_drafts::SavedDraft>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -72,10 +73,14 @@ mod tests {
         fs::write(&server, "server-owned").unwrap();
         fs::write(
             &store.path,
-            br#"{"threads":{"first":"Old text"},"future":{"enabled":true}}"#,
+            br#"{"threads":{"first":"Old text"},"new_threads":{"older":{"project_id":"first","text":"Legacy draft","order":1}},"future":{"enabled":true}}"#,
         )
         .unwrap();
         let mut saved = store.load().unwrap();
+        assert_eq!(
+            saved.new_threads["older"].picks,
+            t3_client::message_drafts::Picks::default()
+        );
         saved
             .threads
             .insert("first".into(), "Exact text 🌱\nSecond line".into());
@@ -86,10 +91,15 @@ mod tests {
             "draft".into(),
             t3_client::new_thread_drafts::SavedDraft {
                 project_id: "first".into(),
+                picks: Default::default(),
                 text: "Different project draft".into(),
                 order: 1,
             },
         );
+        saved.thread_picks.insert("first".into(), t3_client::message_drafts::Picks {
+            model: Some(serde_json::json!({"instanceId":"codex", "model":"chosen", "options":{"future":true}})),
+            ..Default::default()
+        });
         store.save(&saved).unwrap();
         assert_eq!(Store::new(&home.0).load().unwrap(), saved);
         assert_eq!(fs::read_to_string(&server).unwrap(), "server-owned");
