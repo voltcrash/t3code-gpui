@@ -19,6 +19,7 @@ pub mod planning;
 pub mod projects;
 pub mod provider_settings;
 pub mod providers;
+pub mod question_drafts;
 pub mod requests;
 pub mod review;
 pub mod rpc;

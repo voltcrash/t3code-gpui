@@ -108,8 +108,8 @@ pub struct Composer {
     attachments: Entity<AttachmentDraft>,
     requests: PendingRequests,
     /// Per request, per question.
-    drafts: HashMap<String, HashMap<String, Draft>>,
-    question_index: HashMap<String, usize>,
+    question_drafts: t3_client::question_drafts::State,
+    requests_loaded: bool,
     binding: Option<Binding>,
     /// The message the person was writing before a question took the box.
     stashed_message: Option<SharedString>,
@@ -153,6 +153,10 @@ impl Composer {
             .picks(target.draft_id())
             .cloned()
             .unwrap_or_default();
+        let question_drafts = match &target {
+            Target::Thread(id) => env.read(cx).question_drafts.get(id),
+            Target::Draft(_) => Default::default(),
+        };
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -201,8 +205,10 @@ impl Composer {
                     cx.notify();
                 }
                 let pending = thread.read(cx).pending();
-                if *pending != this.requests {
+                let loaded = thread.read(cx).requests_ready();
+                if *pending != this.requests || loaded != this.requests_loaded {
                     this.requests = pending.clone();
+                    this.requests_loaded = loaded;
                     this.sync(window, cx);
                 }
             }));
@@ -213,8 +219,8 @@ impl Composer {
             input,
             attachments,
             requests: PendingRequests::default(),
-            drafts: HashMap::new(),
-            question_index: HashMap::new(),
+            question_drafts,
+            requests_loaded: false,
             binding: None,
             stashed_message: None,
             busy: false,
@@ -656,7 +662,8 @@ impl Composer {
         if let Some(input) = self.requests.user_inputs.first() {
             let last = input.questions.len().saturating_sub(1);
             let index = self
-                .question_index
+                .question_drafts
+                .indices
                 .get(&input.request_id)
                 .copied()
                 .unwrap_or(0)
@@ -667,19 +674,19 @@ impl Composer {
     }
 
     fn draft(&self, request_id: &str, question: &Question) -> Draft {
-        self.drafts
-            .get(request_id)
-            .and_then(|drafts| drafts.get(&question.id))
-            .cloned()
-            .unwrap_or_else(|| Draft::seeded(question))
+        self.question_drafts.draft(request_id, question)
     }
 
     fn draft_mut(&mut self, request_id: &str, question: &Question) -> &mut Draft {
-        self.drafts
-            .entry(request_id.to_owned())
-            .or_default()
-            .entry(question.id.clone())
-            .or_insert_with(|| Draft::seeded(question))
+        self.question_drafts.draft_mut(request_id, question)
+    }
+
+    fn store_question_drafts(&self, cx: &mut Context<Self>) {
+        if let Some(id) = self.thread_id() {
+            self.env.update(cx, |env, _| {
+                env.question_drafts.edit(id, self.question_drafts.clone());
+            });
+        }
     }
 
     /// Points the text box and placeholder at whatever the mode needs.
@@ -703,14 +710,14 @@ impl Composer {
                     .update(cx, |input, cx| input.set_value(message, window, cx));
             }
         }
-        let live_ids: Vec<&String> = self
-            .requests
-            .user_inputs
-            .iter()
-            .map(|input| &input.request_id)
-            .collect();
-        self.drafts.retain(|id, _| live_ids.contains(&id));
-        self.question_index.retain(|id, _| live_ids.contains(&id));
+        if let Some(id) = self.thread_id() {
+            self.question_drafts = self.env.read(cx).question_drafts.get(id);
+        }
+        // The initial empty request list precedes the thread snapshot.
+        if self.requests_loaded {
+            self.question_drafts.prune(&self.requests);
+            self.store_question_drafts(cx);
+        }
 
         let (binding, text) = match self.mode() {
             Mode::Question(input, index) => match input.questions.get(index) {
@@ -728,6 +735,13 @@ impl Composer {
             },
             _ => (None, String::new()),
         };
+        if binding == self.binding
+            && binding.is_some()
+            && self.input.read(cx).value().as_ref() != text
+        {
+            self.input
+                .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+        }
         if binding != self.binding {
             let value = match (&self.binding, &binding) {
                 (None, Some(_)) => {
@@ -781,6 +795,7 @@ impl Composer {
                 draft.selected.clear();
             }
             draft.custom = Some(text);
+            self.store_question_drafts(cx);
         } else {
             let text = self.input.read(cx).value();
             self.env.update(cx, |env, _| {
@@ -980,7 +995,10 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.question_index.insert(request_id.to_owned(), index);
+        self.question_drafts
+            .indices
+            .insert(request_id.to_owned(), index);
+        self.store_question_drafts(cx);
         self.sync(window, cx);
     }
 
@@ -993,6 +1011,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.draft_mut(request_id, question).toggle(question, value);
+        self.store_question_drafts(cx);
         // The typed answer would win over the pick, so it goes.
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));

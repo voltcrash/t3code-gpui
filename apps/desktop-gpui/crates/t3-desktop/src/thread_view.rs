@@ -171,6 +171,10 @@ impl ThreadView {
     }
 
     /// What the agent is waiting on the person for.
+    pub fn requests_ready(&self) -> bool {
+        self.state.projection.is_some() && self.state.synchronized
+    }
+
     pub fn pending(&self) -> &PendingRequests {
         &self.pending
     }

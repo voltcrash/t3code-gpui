@@ -13,6 +13,7 @@ use std::{
 pub struct SavedDrafts {
     pub threads: BTreeMap<String, String>,
     pub thread_picks: BTreeMap<String, t3_client::message_drafts::Picks>,
+    pub question_answers: BTreeMap<String, t3_client::question_drafts::State>,
     pub new_threads: BTreeMap<String, t3_client::new_thread_drafts::SavedDraft>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -100,6 +101,14 @@ mod tests {
             model: Some(serde_json::json!({"instanceId":"codex", "model":"chosen", "options":{"future":true}})),
             ..Default::default()
         });
+        saved.question_answers.insert(
+            "first".into(),
+            serde_json::from_value(serde_json::json!({
+                "answers":{"request":{"question":{"selected":["A"],"custom":"Unsent answer 🌱"}}},
+                "indices":{"request":1}
+            }))
+            .unwrap(),
+        );
         store.save(&saved).unwrap();
         assert_eq!(Store::new(&home.0).load().unwrap(), saved);
         assert_eq!(fs::read_to_string(&server).unwrap(), "server-owned");

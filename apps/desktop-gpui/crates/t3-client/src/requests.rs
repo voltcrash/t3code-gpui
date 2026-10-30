@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::thread::{ThreadProjection, TurnItem};
@@ -217,7 +217,8 @@ pub fn pending_requests(projection: &ThreadProjection) -> PendingRequests {
 }
 
 /// What the person has picked or typed for one question so far.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Draft {
     pub selected: Vec<String>,
     pub custom: Option<String>,
