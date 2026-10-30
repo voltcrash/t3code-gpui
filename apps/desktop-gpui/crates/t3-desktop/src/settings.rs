@@ -6,6 +6,7 @@ use crate::preferences::{self, Model};
 use crate::tokio_bridge;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, h_flex, v_flex,
@@ -22,6 +23,8 @@ pub struct Settings {
     env: Entity<LocalEnvironment>,
     saving_provider: Option<String>,
     provider_error: Option<SharedString>,
+    saving_workspace: bool,
+    workspace_error: Option<SharedString>,
     _observe: Vec<Subscription>,
 }
 impl EventEmitter<Closed> for Settings {}
@@ -40,6 +43,8 @@ impl Settings {
             env,
             saving_provider: None,
             provider_error: None,
+            saving_workspace: false,
+            workspace_error: None,
             focus,
             _observe: observe,
         }
@@ -94,6 +99,103 @@ impl Settings {
         })
         .detach();
         cx.notify();
+    }
+
+    fn set_workspace(&mut self, mode: Option<&'static str>, cx: &mut Context<Self>) {
+        if self.saving_workspace {
+            return;
+        }
+        let env = self.env.read(cx);
+        let (Some(rpc), Some(settings)) = (env.rpc.clone(), env.server.settings.as_ref()) else {
+            return;
+        };
+        if settings.default_thread_env_mode.as_deref() == mode {
+            return;
+        }
+        self.saving_workspace = true;
+        self.workspace_error = None;
+        let update = tokio_bridge::spawn(cx, async move {
+            rpc.call::<_, t3_client::providers::Settings>(
+                "server.updateSettings",
+                &serde_json::json!({"patch":{"defaultThreadEnvMode":mode}}),
+            )
+            .await
+            .map(|settings| settings.default_thread_env_mode.as_deref() == mode)
+        });
+        cx.spawn(async move |this, cx| {
+            let error = match update.await {
+                Ok(Ok(true)) => None,
+                Ok(Ok(false)) => Some("The server did not apply the workspace setting.".to_owned()),
+                Ok(Err(error)) => Some(error.detail()),
+                Err(error) => Some(error.to_string()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.saving_workspace = false;
+                this.workspace_error = error.map(|error| {
+                    tracing::warn!(%error, "saving workspace default failed");
+                    "Could not save the workspace default. Try again.".into()
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn workspace_section(&self, cx: &Context<Self>) -> AnyElement {
+        let env = self.env.read(cx);
+        let settings = env.server.settings.as_ref();
+        let mode = settings.and_then(|settings| settings.default_thread_env_mode.as_deref());
+        let is_worktree = mode == Some("worktree");
+        let disabled = env.rpc.is_none() || settings.is_none() || self.saving_workspace;
+        let local = cx.weak_entity();
+        let worktree = local.clone();
+        v_flex()
+            .gap_2()
+            .child(div().text_lg().font_semibold().child("New threads"))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_4()
+                    .py_3()
+                    .child(v_flex().flex_1().min_w_0().gap_1()
+                        .child(div().text_sm().font_medium().child("Workspace"))
+                        .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                            .child("Where new threads start. Projects and their t3.json can override it.")))
+                    .child(Button::new("workspace-default")
+                        .label(if is_worktree { "New worktree" } else { "Local" })
+                        .accessibility_label("Default workspace")
+                        .small()
+                        .disabled(disabled)
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |menu, _, _| {
+                            menu.item(PopupMenuItem::new("Local").checked(!is_worktree)
+                                .on_click({ let local = local.clone(); move |_, _, cx| {
+                                    let _ = local.update(cx, |this, cx| this.set_workspace(Some("local"), cx));
+                                }}))
+                                .item(PopupMenuItem::new("New worktree").checked(is_worktree)
+                                    .on_click({ let worktree = worktree.clone(); move |_, _, cx| {
+                                        let _ = worktree.update(cx, |this, cx| this.set_workspace(Some("worktree"), cx));
+                                    }}))
+                        }))
+                    .when(mode.is_some(), |row| row.child(
+                        Button::new("reset-workspace-default")
+                            .label("Reset")
+                            .accessibility_label("Reset default workspace")
+                            .tooltip("Use project and t3.json defaults")
+                            .small()
+                            .ghost()
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, _, cx| this.set_workspace(None, cx))),
+                    )),
+            )
+            .when(self.saving_workspace, |section| section.child(
+                div().text_xs().text_color(cx.theme().muted_foreground).child("Saving workspace…"),
+            ))
+            .when_some(self.workspace_error.clone(), |section, error| section.child(
+                div().text_xs().text_color(cx.theme().danger).child(error),
+            ))
+            .into_any_element()
     }
 
     fn providers_section(&self, cx: &Context<Self>) -> AnyElement {
@@ -324,6 +426,7 @@ impl Render for Settings {
                                         ),
                                     ),
                             )
+                            .child(self.workspace_section(cx))
                             .child(self.providers_section(cx))
                             .when(cfg!(target_os = "linux"), |column| column.child(
                                 v_flex().gap_2()
