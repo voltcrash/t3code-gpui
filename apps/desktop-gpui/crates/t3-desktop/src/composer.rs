@@ -110,6 +110,7 @@ impl Composer {
         env: Entity<LocalEnvironment>,
         target: Target,
         thread: Option<&Entity<ThreadView>>,
+        attachments: Entity<AttachmentDraft>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -125,7 +126,6 @@ impl Composer {
             input.set_value(restored, window, cx);
             input
         });
-        let attachments = cx.new(|_| AttachmentDraft::new(env.clone()));
         let mut subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -1037,11 +1037,20 @@ impl Composer {
             Ok::<_, t3_client::RpcError>(())
         });
         let env = self.env.clone();
+        let attachments = self.attachments.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match dispatched.await {
                 Ok(result) => result.map_err(|error| error.detail()),
                 Err(error) => Err(error.to_string()),
             };
+            if sends_attachments {
+                attachments.update(cx, |draft, cx| {
+                    draft.set_locked(false, cx);
+                    if result.is_ok() {
+                        draft.clear(cx);
+                    }
+                });
+            }
             // Finish against environment state even if navigation dropped this composer.
             if let Some(submission) = submission {
                 env.update(cx, |env, cx| {
@@ -1051,16 +1060,10 @@ impl Composer {
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
-                if sends_attachments {
-                    this.attachments
-                        .update(cx, |draft, cx| draft.set_locked(false, cx));
-                }
                 match result {
                     Ok(()) => {
                         if sends_attachments {
                             this.picked_interaction_mode = None;
-                            this.attachments
-                                .update(cx, |attachments, cx| attachments.clear(cx));
                         }
                         if clears_input && (!tracked || this.binding.is_some()) {
                             this.input.update(cx, |input, cx| input.clean(window, cx));

@@ -20,6 +20,7 @@ use t3_client::thread::{
 };
 
 use crate::appearance::CONTENT_WIDTH;
+use crate::attachment_draft::AttachmentDraft;
 use crate::attachment_view::AttachmentView;
 use crate::composer::{Composer, Target};
 use crate::environment::LocalEnvironment;
@@ -80,6 +81,7 @@ impl ThreadView {
     pub fn new(
         env: Entity<LocalEnvironment>,
         thread_id: SharedString,
+        attachments: Entity<AttachmentDraft>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -121,6 +123,7 @@ impl ThreadView {
                 env.clone(),
                 Target::Thread(thread_id.clone()),
                 Some(&this),
+                attachments,
                 window,
                 cx,
             )
