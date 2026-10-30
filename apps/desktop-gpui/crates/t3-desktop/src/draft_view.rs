@@ -34,6 +34,7 @@ impl DraftView {
         env: Entity<LocalEnvironment>,
         id: String,
         project_id: String,
+        attachments: Entity<AttachmentDraft>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -43,7 +44,6 @@ impl DraftView {
             defaults: None,
             loaded: false,
         });
-        let attachments = cx.new(|_| AttachmentDraft::new(env.clone()));
         let composer =
             cx.new(|cx| Composer::new(env.clone(), target, None, attachments, window, cx));
         composer.update(cx, |composer, cx| composer.focus(window, cx));
@@ -66,6 +66,11 @@ impl DraftView {
         };
         view.load(window, cx);
         view
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
     }
 
     pub fn id(&self) -> &str {

@@ -122,6 +122,7 @@ pub struct Workspace {
     actions: Entity<ThreadActions>,
     thread: Option<Entity<ThreadView>>,
     attachment_drafts: HashMap<SharedString, Entity<AttachmentDraft>>,
+    new_thread_attachments: HashMap<SharedString, (Entity<AttachmentDraft>, Subscription)>,
     draft: Option<(Entity<DraftView>, Subscription)>,
     project_picker: Option<(Entity<ProjectPicker>, Subscription)>,
     pending_project: Option<String>,
@@ -366,6 +367,7 @@ impl Workspace {
             actions,
             thread: None,
             attachment_drafts: HashMap::new(),
+            new_thread_attachments: HashMap::new(),
             draft: None,
             project_picker: None,
             pending_project: None,
@@ -461,6 +463,8 @@ impl Workspace {
         let env = self.env.clone();
         let id_for_undo = id.to_owned();
         let focus = self.focus.clone();
+        let workspace = cx.entity().downgrade();
+        let discarded_id = id.to_owned();
         window.push_notification(
             Notification::new()
                 .message("Discarded draft")
@@ -482,7 +486,22 @@ impl Workspace {
                             focus.focus(window, cx);
                         }))
                 })
-                .autohide(true),
+                .autohide(true)
+                .on_close(move |_, cx| {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                        if workspace
+                            .env
+                            .read(cx)
+                            .new_thread_drafts
+                            .project(&discarded_id)
+                            .is_none()
+                        {
+                            workspace
+                                .new_thread_attachments
+                                .remove(discarded_id.as_str());
+                        }
+                    });
+                }),
             cx,
         );
         if self
@@ -516,8 +535,42 @@ impl Workspace {
         self.pending_project = None;
         self.changes = None;
         self.changes_return_focus = None;
-        let draft =
-            cx.new(|cx| DraftView::new(self.env.clone(), id.to_string(), project_id, window, cx));
+        if let Some((draft, _)) = &self.draft
+            && draft.read(cx).id() == id.as_ref()
+        {
+            draft.update(cx, |draft, cx| draft.focus(window, cx));
+            cx.notify();
+            return;
+        }
+        self.new_thread_attachments
+            .retain(|_, (tray, _)| tray.read(cx).retain_on_navigation());
+        let attachments = if let Some((tray, _)) = self.new_thread_attachments.get(&id) {
+            tray.clone()
+        } else {
+            let tray = cx.new(|_| AttachmentDraft::new(self.env.clone()));
+            let draft_id = id.clone();
+            let observe = cx.observe(&tray, move |this, tray, cx| {
+                let present = tray.read(cx).retain_on_navigation();
+                this.env.update(cx, |env, cx| {
+                    if env.new_thread_drafts.mark_attachments(&draft_id, present) {
+                        cx.notify();
+                    }
+                });
+            });
+            self.new_thread_attachments
+                .insert(id.clone(), (tray.clone(), observe));
+            tray
+        };
+        let draft = cx.new(|cx| {
+            DraftView::new(
+                self.env.clone(),
+                id.to_string(),
+                project_id,
+                attachments,
+                window,
+                cx,
+            )
+        });
         let subscription = cx.subscribe_in(
             &draft,
             window,

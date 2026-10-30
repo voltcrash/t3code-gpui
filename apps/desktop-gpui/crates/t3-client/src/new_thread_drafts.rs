@@ -13,11 +13,18 @@ pub struct SavedDraft {
     pub order: u64,
 }
 
+#[derive(Clone)]
+pub struct DiscardedDraft {
+    saved: SavedDraft,
+    has_attachments: bool,
+}
+
 #[derive(Default)]
 pub struct Drafts {
     pub messages: message_drafts::Drafts,
     sessions: BTreeMap<String, (String, u64)>,
     touched: HashSet<String>,
+    attachments: HashSet<String>,
     revision: u64,
     order: u64,
 }
@@ -55,30 +62,54 @@ impl Drafts {
             return false;
         }
         self.messages.edit(id, "");
+        self.attachments.remove(id);
         self.touched.insert(id.into());
         self.revision += 1;
         true
     }
 
-    pub fn discard(&mut self, id: &str) -> Option<SavedDraft> {
+    pub fn discard(&mut self, id: &str) -> Option<DiscardedDraft> {
         let (project_id, order) = self.sessions.get(id)?.clone();
         let saved = SavedDraft {
             project_id,
             order,
             text: self.messages.text(id).into(),
         };
-        self.remove(id).then_some(saved)
+        let has_attachments = self.has_attachments(id);
+        self.remove(id).then_some(DiscardedDraft {
+            saved,
+            has_attachments,
+        })
     }
 
-    pub fn restore_discarded(&mut self, id: &str, saved: &SavedDraft) -> bool {
+    pub fn restore_discarded(&mut self, id: &str, discarded: &DiscardedDraft) -> bool {
         if self.sessions.contains_key(id) {
             return false;
         }
+        let saved = &discarded.saved;
         self.sessions
             .insert(id.into(), (saved.project_id.clone(), saved.order));
         self.messages.edit(id, &saved.text);
+        if discarded.has_attachments {
+            self.attachments.insert(id.into());
+        }
         self.revision += 1;
         true
+    }
+
+    pub fn has_attachments(&self, id: &str) -> bool {
+        self.attachments.contains(id)
+    }
+
+    pub fn mark_attachments(&mut self, id: &str, present: bool) -> bool {
+        if !self.sessions.contains_key(id) {
+            return false;
+        }
+        if present {
+            self.attachments.insert(id.into())
+        } else {
+            self.attachments.remove(id)
+        }
     }
 
     pub fn finish(&mut self, id: &str, submission: message_drafts::Submission, accepted: bool) {
@@ -175,6 +206,23 @@ mod tests {
         assert!(!drafts.messages.text(&id).is_empty());
         assert!(drafts.remove(&id));
         assert!(drafts.snapshot().is_empty());
+    }
+
+    #[test]
+    fn attachment_only_drafts_stay_visible_and_undo_keeps_the_tray_claim() {
+        let mut drafts = Drafts::default();
+        let id = drafts.create("project");
+        assert!(drafts.mark_attachments(&id, true));
+        assert!(!drafts.mark_attachments(&id, true));
+        assert!(drafts.has_attachments(&id));
+        assert!(drafts.snapshot().is_empty());
+        let discarded = drafts.discard(&id).unwrap();
+        assert!(!drafts.has_attachments(&id));
+        assert!(!drafts.mark_attachments(&id, true));
+        assert!(drafts.restore_discarded(&id, &discarded));
+        assert!(drafts.has_attachments(&id));
+        assert!(drafts.mark_attachments(&id, false));
+        assert!(!drafts.has_attachments(&id));
     }
 
     #[test]
