@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "apps/desktop-gpui/**"
+      - "assets/dev/**"
+      - "assets/prod/**"
       # The integration tests drive the real server from source.
       - "apps/server/**"
       - "packages/**"
@@ -62,3 +64,6 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      - name: Test portable bundles
+        run: node --test scripts/bundle.test.mjs

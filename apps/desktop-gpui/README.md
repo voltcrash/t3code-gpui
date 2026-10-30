@@ -72,6 +72,16 @@ configuration. The Node distribution must include its `LICENSE`. Existing output
 On Windows, pass the `.exe` as `--desktop`; on macOS, use an output ending in `.app`. The version
 defaults to the native crate's version and can be set with `--version`.
 
+macOS bundles include the existing T3 app icon. Windows Cargo builds embed the existing ICO (a
+Windows resource compiler is required). Debug native builds use the existing blueprint development
+icon; release builds use the production icon.
+
+Linux bundles include `share/applications/t3code.desktop` and a matching icon under
+`share/icons/hicolor/scalable/apps`. To register the portable build with a desktop launcher, copy those
+files into the corresponding `~/.local/share` directories and put a symlink to the bundled
+`t3-desktop` executable on your `PATH`. The launcher uses the executable name so relocating the
+bundle only requires updating that symlink.
+
 This assembles resources; it does not build the server, fetch Node, sign an app, or generate installers.
 Run its focused checks with `node --test apps/desktop-gpui/scripts/bundle.test.mjs`.
 
