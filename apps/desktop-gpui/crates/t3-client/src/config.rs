@@ -24,6 +24,7 @@ pub enum ConfigStreamItem {
 pub struct ServerState {
     pub providers: Vec<Provider>,
     pub editors: crate::editors::Catalog,
+    pub new_projects_root: Option<String>,
     pub providers_loaded: bool,
     /// `None` until a settings snapshot arrives.
     pub settings: Option<Settings>,
@@ -41,6 +42,7 @@ impl ServerState {
                 self.thread_visited_tracking =
                     config["environment"]["capabilities"]["threadVisitedTracking"] == true;
                 self.thread_find_progressive = config["threadFindProgressive"] == true;
+                self.new_projects_root = config["newProjectsRoot"].as_str().map(str::to_owned);
                 self.editors = crate::editors::Catalog::from_config(&config);
                 self.providers = providers::from_config(&config);
                 self.providers_loaded = true;

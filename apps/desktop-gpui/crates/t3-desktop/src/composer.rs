@@ -91,6 +91,7 @@ pub struct NewThread {
     pub id: String,
     pub project_id: String,
     pub defaults: Option<NewThreadDefaults>,
+    pub workspace: Box<t3_client::workspaces::Strategy>,
     pub loaded: bool,
 }
 
@@ -811,7 +812,7 @@ impl Composer {
         let env = self.env.read(cx);
         let ready = match &self.target {
             Target::Thread(id) => env.shell.threads.contains_key(id.as_ref()),
-            Target::Draft(draft) => draft.defaults.is_some(),
+            Target::Draft(draft) => draft.defaults.is_some() && draft.loaded,
         };
         env.rpc.is_some() && env.commands_supported && !self.busy && ready
     }
@@ -875,6 +876,7 @@ impl Composer {
                 return;
             }
             let (thread_id, input) = commands::launch_thread(&commands::NewThread {
+                workspace: &draft.workspace,
                 project_id: &draft.project_id,
                 model_selection: &model_selection,
                 runtime_mode: &runtime_mode,

@@ -450,8 +450,7 @@ impl Sidebar {
             .filter_map(|id| {
                 let project = env.shell.project(drafts.project(id)?)?;
                 let text = drafts.messages.text(id);
-                if text.is_empty()
-                    && drafts.messages.picks(id).is_none()
+                if !drafts.has_saved_content(id)
                     && !drafts.has_attachments(id)
                     && self.selected_draft.as_deref() != Some(id)
                     && !drafts.messages.busy(id)

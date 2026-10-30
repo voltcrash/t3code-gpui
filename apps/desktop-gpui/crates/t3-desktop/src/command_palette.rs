@@ -8,9 +8,9 @@ use gpui_kit::*;
 use crate::desktop::{OpenSettings, ResetZoom, ToggleFullscreen, ZoomIn, ZoomOut};
 use crate::environment::LocalEnvironment;
 use crate::workspace::{
-    AddProject, FindInThread, GoBack, GoForward, NewThread, NextThread, OpenInEditor,
+    AddProject, ChooseBranch, FindInThread, GoBack, GoForward, NewThread, NextThread, OpenInEditor,
     PreviousThread, ToggleChanges, TogglePlanMode, ToggleSidebar, ToggleThreadPin,
-    ToggleThreadSettlement,
+    ToggleThreadSettlement, ToggleWorkspace,
 };
 
 #[derive(Clone, PartialEq, Action)]
@@ -33,6 +33,7 @@ pub fn content(
     can_plan: bool,
     sidebar_visible: bool,
     can_open_editor: bool,
+    can_choose_workspace: bool,
 ) -> Command {
     let thread = thread_id.and_then(|id| env.thread(id));
     let can_operate = env.rpc.is_some();
@@ -52,6 +53,14 @@ pub fn content(
         .item(
             item("Find in thread", IconName::Search, FindInThread)
                 .disabled(thread.is_none() || !can_operate || !env.server.thread_find),
+        )
+        .item(
+            item("Toggle workspace", IconName::FolderCode, ToggleWorkspace)
+                .disabled(!can_choose_workspace),
+        )
+        .item(
+            item("Choose branch", IconName::GitBranch, ChooseBranch)
+                .disabled(!can_choose_workspace),
         )
         .item(item("Toggle plan mode", IconName::ListTodo, TogglePlanMode).disabled(!can_plan));
     if let Some(thread) = thread {
