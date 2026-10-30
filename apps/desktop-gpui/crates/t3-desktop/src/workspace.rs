@@ -13,7 +13,7 @@ use gpui_kit::*;
 
 use t3_client::shell::timestamp_ms;
 
-use crate::appearance::{SIDEBAR_WIDTH, TOPBAR_HEIGHT};
+use crate::appearance::TOPBAR_HEIGHT;
 use crate::attachment_draft::AttachmentDraft;
 use crate::changes::{self, Changes};
 use crate::desktop::{
@@ -27,6 +27,7 @@ use crate::settings::{self, Settings};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::thread_actions::{self, ThreadActions};
 use crate::thread_view::ThreadView;
+use gpui_kit::base::{HandleEdge, resize_handle};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 
@@ -111,6 +112,19 @@ pub fn bind_keys(cx: &mut App) {
     }
 }
 
+#[derive(Clone)]
+struct SidebarResize;
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+fn sidebar_width(preferred: Pixels, viewport: Pixels) -> Pixels {
+    preferred.clamp(px(208.), (viewport - px(640.)).max(px(208.)))
+}
+
 pub struct Workspace {
     focus: FocusHandle,
     palette: Option<Entity<CommandState>>,
@@ -123,6 +137,7 @@ pub struct Workspace {
     sidebar: Entity<Sidebar>,
     visit: Entity<crate::thread_visit::ThreadVisit>,
     sidebar_visible: bool,
+    sidebar_width: Pixels,
     sidebar_focus: FocusHandle,
     actions: Entity<ThreadActions>,
     thread: Option<Entity<ThreadView>>,
@@ -244,6 +259,7 @@ impl Workspace {
             t3_host::window_state::View {
                 zoom: self.zoom,
                 sidebar_visible: self.sidebar_visible,
+                sidebar_width: self.sidebar_width.into(),
             },
             cx,
         );
@@ -406,6 +422,7 @@ impl Workspace {
             sidebar,
             visit,
             sidebar_visible: crate::window_state::view(cx).sidebar_visible,
+            sidebar_width: px(crate::window_state::view(cx).sidebar_width),
             sidebar_focus: cx.focus_handle(),
             actions,
             thread: None,
@@ -1047,6 +1064,7 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = sidebar_width(self.sidebar_width, window.viewport_size().width);
         let visible = self.settings.is_none()
             && self.project_picker.is_none()
             && self.pending_project.is_none()
@@ -1168,14 +1186,38 @@ impl Render for Workspace {
                     .w_full()
                     .flex_1()
                     .min_h_0()
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<SidebarResize>, window, cx| {
+                            if this.sidebar_visible {
+                                let width = sidebar_width(
+                                    event.event.position.x - event.bounds.origin.x,
+                                    window.viewport_size().width,
+                                );
+                                if this.sidebar_width != width {
+                                    this.sidebar_width = width;
+                                    this.remember_view(cx);
+                                    cx.notify();
+                                }
+                            }
+                        },
+                    ))
                     .when(self.sidebar_visible, |row| {
                         row.child(
                             div()
                                 .track_focus(&self.sidebar_focus)
-                                .w(SIDEBAR_WIDTH)
+                                .relative()
+                                .w(width)
                                 .h_full()
                                 .flex_none()
-                                .child(self.sidebar.clone()),
+                                .child(self.sidebar.clone())
+                                .child(
+                                    resize_handle("sidebar-resize", Axis::Horizontal)
+                                        .inside(HandleEdge::Trailing)
+                                        .on_drag(SidebarResize, |drag, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.new(|_| drag.clone())
+                                        }),
+                                ),
                         )
                     })
                     .child(self.render_main(window.viewport_size().width, cx)),

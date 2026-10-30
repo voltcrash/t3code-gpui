@@ -853,14 +853,22 @@ async fn verifies_progressive_history(
     let sequence = state.sequence;
     let history =
         t3_client::history::HistoryClient::new(http.clone(), base.clone(), access_token.into());
-    verifies_thread_find(client, &history, &state).await;
+    let renamed = t3_client::commands::dispatch(
+        client,
+        &t3_client::thread_actions::Action::Rename("History search fixture".into())
+            .command("history-fixture"),
+    )
+    .await
+    .unwrap();
+    assert!(renamed.sequence > sequence.unwrap());
+    verifies_thread_find(client, &history, &state, renamed.sequence).await;
     let mut pages = 0;
     while let Some(request) = state.history_request() {
         let page = history
             .page("history-fixture", &request.cursor)
             .await
             .unwrap();
-        assert_eq!(page.snapshot_sequence, sequence.unwrap());
+        assert!(page.snapshot_sequence >= renamed.sequence);
         assert!(state.apply_history(&request, page));
         pages += 1;
         assert!(pages < 10, "history must make progress");
@@ -889,6 +897,7 @@ async fn verifies_thread_find(
     client: &RpcClient,
     history: &t3_client::history::HistoryClient,
     recent: &ThreadState,
+    minimum_revision: u64,
 ) {
     use t3_client::find::{self, SearchResult};
     let mut search = find::State::default();
@@ -902,7 +911,8 @@ async fn verifies_thread_find(
         result.total_matches, 2,
         "search rendered text, excluding link destinations"
     );
-    assert_eq!(result.snapshot_sequence, recent.sequence.unwrap());
+    // Find reads the current thread revision, not the earlier stream snapshot.
+    assert!(result.snapshot_sequence >= minimum_revision);
     let selected = result.selected.as_ref().unwrap();
     assert_eq!(selected.entry_id, "assistant_message-1");
     assert_eq!(selected.occurrence, 0);

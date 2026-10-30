@@ -36,6 +36,7 @@ impl Rectangle {
 pub struct View {
     pub zoom: f32,
     pub sidebar_visible: bool,
+    pub sidebar_width: f32,
 }
 
 impl Default for View {
@@ -43,6 +44,7 @@ impl Default for View {
         Self {
             zoom: 1.,
             sidebar_visible: true,
+            sidebar_width: 256.,
         }
     }
 }
@@ -79,6 +81,12 @@ impl Store {
                         || !(0.5..=3.).contains(&placement.view.zoom))
                 {
                     placement.view.zoom = 1.;
+                }
+                if let Some(placement) = &mut placement
+                    && (!placement.view.sidebar_width.is_finite()
+                        || placement.view.sidebar_width < 208.)
+                {
+                    placement.view.sidebar_width = View::default().sidebar_width;
                 }
                 Ok(placement)
             }
@@ -158,9 +166,11 @@ mod tests {
         .unwrap();
         assert_eq!(placement.view.zoom, 1.);
         assert!(placement.view.sidebar_visible);
+        assert_eq!(placement.view.sidebar_width, 256.);
         placement.view = View {
             zoom: 1.44,
             sidebar_visible: false,
+            sidebar_width: 360.,
         };
         store.save(placement).unwrap();
         assert_eq!(
@@ -175,6 +185,14 @@ mod tests {
             assert_eq!(restored.view.zoom, 1.);
             assert!(!restored.view.sidebar_visible);
             assert_eq!(restored.bounds, placement.bounds);
+        }
+        for width in [0., -1., 207.] {
+            let mut value = serde_json::to_value(placement).unwrap();
+            value["view"]["sidebar_width"] = serde_json::json!(width);
+            fs::write(&store.0, serde_json::to_vec(&value).unwrap()).unwrap();
+            let restored = store.load().unwrap().unwrap();
+            assert_eq!(restored.view.sidebar_width, 256.);
+            assert_eq!(restored.view.zoom, placement.view.zoom);
         }
         fs::remove_dir_all(root).unwrap();
     }
