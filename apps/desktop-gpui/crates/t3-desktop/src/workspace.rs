@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 
 use gpui_kit::base::FocusTrapElement;
-use gpui_kit::component::StyledExt;
 use gpui_kit::component::command::CommandState;
 use gpui_kit::component::menu::AppMenuBar;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, Disableable, h_flex, v_flex};
+use gpui_kit::component::{StyledExt, WindowExt};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -342,6 +343,8 @@ impl Workspace {
                 window,
                 |this, _, event: &SidebarEvent, window, cx| match event {
                     SidebarEvent::SelectionChanged => this.open_selected(window, cx),
+                    SidebarEvent::OpenDraft(id) => this.resume_draft(id.clone(), window, cx),
+                    SidebarEvent::DiscardDraft(id) => this.discard_draft(id, window, cx),
                     SidebarEvent::NewThread => this.new_thread(window, cx),
                     SidebarEvent::AddProject => this.add_project(window, cx),
                     SidebarEvent::Settings => this.open_settings(window, cx),
@@ -437,9 +440,84 @@ impl Workspace {
     }
 
     fn open_draft(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.env.update(cx, |env, cx| {
+            let id = env.new_thread_drafts.create(&project_id);
+            cx.notify();
+            id
+        });
+        self.resume_draft(id.into(), window, cx);
+    }
+
+    fn discard_draft(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(discarded) = self.env.update(cx, |env, cx| {
+            let discarded = env.new_thread_drafts.discard(id);
+            if discarded.is_some() {
+                cx.notify();
+            }
+            discarded
+        }) else {
+            return;
+        };
+        let env = self.env.clone();
+        let id_for_undo = id.to_owned();
+        let focus = self.focus.clone();
+        window.push_notification(
+            Notification::new()
+                .message("Discarded draft")
+                .action(move |_, _, cx| {
+                    let env = env.clone();
+                    let id = id_for_undo.clone();
+                    let discarded = discarded.clone();
+                    let focus = focus.clone();
+                    Button::new("undo-discard-draft")
+                        .label("Undo")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |note, _, window, cx| {
+                            env.update(cx, |env, cx| {
+                                env.new_thread_drafts.restore_discarded(&id, &discarded);
+                                cx.notify();
+                            });
+                            note.dismiss(window, cx);
+                            focus.focus(window, cx);
+                        }))
+                })
+                .autohide(true),
+            cx,
+        );
+        if self
+            .draft
+            .as_ref()
+            .is_some_and(|(draft, _)| draft.read(cx).id() == id)
+        {
+            self.draft = None;
+            self.focus.focus(window, cx);
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.clear_selection(cx));
+        }
+        cx.notify();
+    }
+
+    fn resume_draft(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project_id) = self
+            .env
+            .read(cx)
+            .new_thread_drafts
+            .project(&id)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        if self.env.read(cx).shell.project(&project_id).is_none() {
+            return;
+        }
+        self.settings = None;
+        self.project_picker = None;
+        self.pending_project = None;
         self.changes = None;
         self.changes_return_focus = None;
-        let draft = cx.new(|cx| DraftView::new(self.env.clone(), project_id, window, cx));
+        let draft =
+            cx.new(|cx| DraftView::new(self.env.clone(), id.to_string(), project_id, window, cx));
         let subscription = cx.subscribe_in(
             &draft,
             window,
@@ -455,7 +533,7 @@ impl Workspace {
         self.thread = None;
         self.draft = Some((draft, subscription));
         self.sidebar
-            .update(cx, |sidebar, cx| sidebar.clear_selection(cx));
+            .update(cx, |sidebar, cx| sidebar.select_draft(id, cx));
         cx.notify();
     }
 

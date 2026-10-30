@@ -11,7 +11,7 @@ use gpui_kit::component::StyledExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::component::menu::ContextMenuExt;
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use t3_client::shell::{ThreadShell, ThreadStatus, sidebar_sections, timestamp_ms};
@@ -27,6 +27,8 @@ const ROW_HEIGHT: Pixels = px(36.);
 
 pub enum SidebarEvent {
     SelectionChanged,
+    OpenDraft(SharedString),
+    DiscardDraft(SharedString),
     NewThread,
     AddProject,
     Settings,
@@ -64,6 +66,11 @@ struct SearchRow {
 
 #[derive(Clone)]
 enum Row {
+    Draft {
+        id: SharedString,
+        title: SharedString,
+        busy: bool,
+    },
     Thread(ThreadRow),
     Shelf {
         shelf: Shelf,
@@ -77,6 +84,7 @@ enum Row {
 pub struct Sidebar {
     env: Entity<LocalEnvironment>,
     selected: Option<SharedString>,
+    selected_draft: Option<SharedString>,
     search_input: Entity<InputState>,
     search: SearchState,
     search_rows: Vec<SearchRow>,
@@ -155,6 +163,7 @@ impl Sidebar {
         Self {
             env,
             selected: None,
+            selected_draft: None,
             search_input,
             search: SearchState::default(),
             search_rows: Vec::new(),
@@ -259,6 +268,7 @@ impl Sidebar {
     }
 
     pub fn select(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.selected_draft = None;
         self.selected = Some(id);
         cx.emit(SidebarEvent::SelectionChanged);
         cx.notify();
@@ -287,22 +297,31 @@ impl Sidebar {
             })
             .filter_map(|row| match row {
                 Row::Thread(thread) => Some(thread.id.clone()),
+                Row::Draft { id, .. } => Some(id.clone()),
                 _ => None,
             })
             .collect();
-        let Some(index) = t3_client::navigation::target(&ids, self.selected.as_ref(), destination)
-        else {
+        let Some(index) = t3_client::navigation::target(
+            &ids,
+            self.selected.as_ref().or(self.selected_draft.as_ref()),
+            destination,
+        ) else {
             return;
         };
         let id = ids[index].clone();
         self.clear_search(window, cx);
-        self.select(id.clone(), cx);
+        if self.env.read(cx).new_thread_drafts.project(&id).is_some() {
+            self.select_draft(id.clone(), cx);
+            cx.emit(SidebarEvent::OpenDraft(id.clone()));
+        } else {
+            self.select(id.clone(), cx);
+        }
         self.rebuild_thread_rows(cx);
-        if let Some(row) = self
-            .rows
-            .iter()
-            .position(|row| matches!(row, Row::Thread(thread) if thread.id == id))
-        {
+        if let Some(row) = self.rows.iter().position(|row| match row {
+            Row::Thread(thread) => thread.id == id,
+            Row::Draft { id: draft, .. } => draft == &id,
+            _ => false,
+        }) {
             self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
         }
     }
@@ -310,6 +329,13 @@ impl Sidebar {
     /// Drops the selection without announcing it, for a draft taking the pane.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
+        self.selected_draft = None;
+        cx.notify();
+    }
+
+    pub fn select_draft(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.selected_draft = Some(id);
         cx.notify();
     }
 
@@ -417,12 +443,39 @@ impl Sidebar {
                 }
             };
 
-        let mut rows: Vec<Row> = sections
-            .pinned
-            .iter()
-            .chain(&sections.active)
-            .map(|thread| row(thread, false))
+        let drafts = &env.new_thread_drafts;
+        let mut rows: Vec<Row> = drafts
+            .rows()
+            .into_iter()
+            .filter_map(|id| {
+                let project = env.shell.project(drafts.project(id)?)?;
+                let text = drafts.messages.text(id);
+                if text.is_empty()
+                    && self.selected_draft.as_deref() != Some(id)
+                    && !drafts.messages.busy(id)
+                {
+                    return None;
+                }
+                let title = if text.trim().is_empty() {
+                    format!("New thread · {}", project.title)
+                } else {
+                    t3_client::commands::title_seed(text)
+                };
+                Some(Row::Draft {
+                    id: id.to_owned().into(),
+                    title: title.into(),
+                    busy: drafts.messages.busy(id),
+                })
+            })
             .collect();
+        rows.extend(
+            sections
+                .pinned
+                .iter()
+                .chain(&sections.active)
+                .map(|thread| row(thread, false)),
+        );
+
         if !sections.snoozed.is_empty() {
             rows.push(Row::Shelf {
                 shelf: Shelf::Snoozed,
@@ -597,6 +650,47 @@ impl Sidebar {
             .text_sm()
             .cursor_pointer();
         match &self.rows[ix] {
+            Row::Draft { id, title, busy } => {
+                let selected = self.selected_draft.as_ref() == Some(id);
+                let open_id = id.clone();
+                let discard_id = id.clone();
+                base.id(id.clone())
+                    .when(selected, |row| row.bg(theme.sidebar_accent))
+                    .when(!selected, |row| {
+                        row.hover(|row| {
+                            row.bg(crate::appearance::palette(cx).color("sidebarRowHover"))
+                        })
+                    })
+                    .child(
+                        Icon::new(Lucide::SquarePen)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(if *busy { "Sending…" } else { "Draft" }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("discard-{id}")))
+                            .icon(Icon::new(Lucide::X))
+                            .ghost()
+                            .xsmall()
+                            .accessibility_label("Discard draft")
+                            .tooltip("Discard draft")
+                            .disabled(*busy)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::DiscardDraft(discard_id.clone()));
+                            })),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SidebarEvent::OpenDraft(open_id.clone()))
+                    }))
+                    .into_any_element()
+            }
             Row::Thread(thread) => {
                 let selected = self.selected.as_ref() == Some(&thread.id);
                 let id = thread.id.clone();

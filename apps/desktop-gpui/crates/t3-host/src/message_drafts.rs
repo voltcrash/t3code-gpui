@@ -12,6 +12,7 @@ use std::{
 #[serde(default)]
 pub struct SavedDrafts {
     pub threads: BTreeMap<String, String>,
+    pub new_threads: BTreeMap<String, t3_client::new_thread_drafts::SavedDraft>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -81,6 +82,14 @@ mod tests {
         saved
             .threads
             .insert("second".into(), "Another draft".into());
+        saved.new_threads.insert(
+            "draft".into(),
+            t3_client::new_thread_drafts::SavedDraft {
+                project_id: "first".into(),
+                text: "Different project draft".into(),
+                order: 1,
+            },
+        );
         store.save(&saved).unwrap();
         assert_eq!(Store::new(&home.0).load().unwrap(), saved);
         assert_eq!(fs::read_to_string(&server).unwrap(), "server-owned");
@@ -89,6 +98,10 @@ mod tests {
         saved.threads.clear();
         store.save(&saved).unwrap();
         assert!(store.load().unwrap().threads.is_empty());
+        assert_eq!(
+            store.load().unwrap().new_threads["draft"].text,
+            "Different project draft"
+        );
         assert_eq!(fs::read_dir(home.0.join("userdata")).unwrap().count(), 2);
     }
 

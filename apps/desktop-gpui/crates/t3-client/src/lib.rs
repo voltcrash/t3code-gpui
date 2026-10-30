@@ -13,6 +13,7 @@ pub mod find;
 pub mod history;
 pub mod message_drafts;
 pub mod navigation;
+pub mod new_thread_drafts;
 pub mod notifications;
 pub mod planning;
 pub mod projects;

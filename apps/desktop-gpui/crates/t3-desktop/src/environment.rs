@@ -40,10 +40,11 @@ pub struct LocalEnvironment {
     pub state: ConnectionState,
     pub shell: ShellState,
     pub message_drafts: t3_client::message_drafts::Drafts,
+    pub new_thread_drafts: t3_client::new_thread_drafts::Drafts,
     pub draft_storage_error: Option<SharedString>,
     draft_store: t3_host::message_drafts::Store,
     saved_drafts: Option<t3_host::message_drafts::SavedDrafts>,
-    saved_draft_revision: Option<u64>,
+    saved_draft_revision: Option<(u64, (u64, u64))>,
     notifications: t3_client::notifications::Tracker,
     pub capabilities: ShellCapabilities,
     /// The live socket, for views that open their own subscriptions.
@@ -126,11 +127,15 @@ impl LocalEnvironment {
         let Some(saved) = self.saved_drafts.as_mut() else {
             return;
         };
-        let revision = self.message_drafts.revision();
+        let revision = (
+            self.message_drafts.revision(),
+            self.new_thread_drafts.revision(),
+        );
         if self.saved_draft_revision == Some(revision) {
             return;
         }
         saved.threads = self.message_drafts.snapshot();
+        saved.new_threads = self.new_thread_drafts.snapshot();
         match self.draft_store.save(saved) {
             Ok(()) => {
                 self.saved_draft_revision = Some(revision);
@@ -150,6 +155,7 @@ impl LocalEnvironment {
             match self.draft_store.load() {
                 Ok(saved) => {
                     self.message_drafts.restore_missing(&saved.threads);
+                    self.new_thread_drafts.restore_missing(&saved.new_threads);
                     self.saved_drafts = Some(saved);
                 }
                 Err(error) => {
@@ -164,10 +170,12 @@ impl LocalEnvironment {
     pub fn start(launch: BackendLaunch, cx: &mut Context<Self>) -> Self {
         let draft_store = t3_host::message_drafts::Store::new(&launch.t3_home);
         let mut message_drafts = t3_client::message_drafts::Drafts::default();
+        let mut new_thread_drafts = t3_client::new_thread_drafts::Drafts::default();
         let (saved_drafts, saved_draft_revision, draft_storage_error) = match draft_store.load() {
             Ok(saved) => {
                 message_drafts.restore_missing(&saved.threads);
-                let revision = message_drafts.revision();
+                new_thread_drafts.restore_missing(&saved.new_threads);
+                let revision = (message_drafts.revision(), new_thread_drafts.revision());
                 (Some(saved), Some(revision), None)
             }
             Err(error) => {
@@ -219,6 +227,7 @@ impl LocalEnvironment {
             state: ConnectionState::StartingServer,
             shell: ShellState::default(),
             message_drafts,
+            new_thread_drafts,
             draft_storage_error,
             draft_store,
             saved_drafts,

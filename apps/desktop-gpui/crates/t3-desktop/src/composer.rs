@@ -52,14 +52,43 @@ struct Binding {
 }
 
 /// Where a message goes: an existing thread, or a new one in a project.
+#[derive(Clone)]
 pub enum Target {
     Thread(SharedString),
     Draft(NewThread),
 }
 
+impl Target {
+    fn draft_id(&self) -> &str {
+        match self {
+            Self::Thread(id) => id,
+            Self::Draft(draft) => &draft.id,
+        }
+    }
+
+    fn drafts<'a>(&self, env: &'a LocalEnvironment) -> &'a t3_client::message_drafts::Drafts {
+        match self {
+            Self::Thread(_) => &env.message_drafts,
+            Self::Draft(_) => &env.new_thread_drafts.messages,
+        }
+    }
+
+    fn drafts_mut<'a>(
+        &self,
+        env: &'a mut LocalEnvironment,
+    ) -> &'a mut t3_client::message_drafts::Drafts {
+        match self {
+            Self::Thread(_) => &mut env.message_drafts,
+            Self::Draft(_) => &mut env.new_thread_drafts.messages,
+        }
+    }
+}
+
 /// A draft's project and the defaults it launches with; `defaults` stays
 /// `None` while they load and when no provider can run.
+#[derive(Clone)]
 pub struct NewThread {
+    pub id: String,
     pub project_id: String,
     pub defaults: Option<NewThreadDefaults>,
     pub loaded: bool,
@@ -114,10 +143,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let restored: SharedString = match &target {
-            Target::Thread(id) => env.read(cx).message_drafts.text(id).to_owned().into(),
-            Target::Draft(_) => "".into(),
-        };
+        let restored: SharedString = target
+            .drafts(env.read(cx))
+            .text(target.draft_id())
+            .to_owned()
+            .into();
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -623,10 +653,11 @@ impl Composer {
 
     /// Points the text box and placeholder at whatever the mode needs.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.thread_id().map(str::to_owned) {
-            let drafts = &self.env.read(cx).message_drafts;
-            self.busy = drafts.busy(&id);
-            let message = drafts.text(&id);
+        {
+            let id = self.target.draft_id();
+            let drafts = self.target.drafts(self.env.read(cx));
+            self.busy = drafts.busy(id);
+            let message = drafts.text(id);
             if self.binding.is_some() {
                 if self.stashed_message.as_deref() != Some(message) {
                     self.stashed_message = Some(message.to_owned().into());
@@ -715,10 +746,13 @@ impl Composer {
                 draft.selected.clear();
             }
             draft.custom = Some(text);
-        } else if let Some(id) = self.thread_id().map(str::to_owned) {
+        } else {
             let text = self.input.read(cx).value();
-            self.env
-                .update(cx, |env, _| env.message_drafts.edit(&id, &text));
+            self.env.update(cx, |env, _| {
+                self.target
+                    .drafts_mut(env)
+                    .edit(self.target.draft_id(), &text);
+            });
         }
         cx.notify();
     }
@@ -997,19 +1031,14 @@ impl Composer {
         let Some(rpc) = self.env.read(cx).rpc.clone() else {
             return;
         };
-        let tracked = self.thread_id().is_some();
-        let submission = if let Some(id) = self.thread_id().map(str::to_owned) {
-            let clears_text = clears_input && self.binding.is_none();
-            let Some(submission) = self.env.update(cx, |env, cx| {
-                let submission = env.message_drafts.begin(&id, clears_text);
-                cx.notify();
-                submission
-            }) else {
-                return;
-            };
-            Some(submission)
-        } else {
-            None
+        let target = self.target.clone();
+        let clears_text = clears_input && self.binding.is_none();
+        let Some(submission) = self.env.update(cx, |env, cx| {
+            let submission = target.drafts_mut(env).begin(target.draft_id(), clears_text);
+            cx.notify();
+            submission
+        }) else {
+            return;
         };
         self.busy = true;
         self.error = None;
@@ -1052,12 +1081,16 @@ impl Composer {
                 });
             }
             // Finish against environment state even if navigation dropped this composer.
-            if let Some(submission) = submission {
-                env.update(cx, |env, cx| {
-                    env.message_drafts.finish(submission, result.is_ok());
-                    cx.notify();
-                });
-            }
+            env.update(cx, |env, cx| {
+                match &target {
+                    Target::Thread(_) => env.message_drafts.finish(submission, result.is_ok()),
+                    Target::Draft(draft) => {
+                        env.new_thread_drafts
+                            .finish(&draft.id, submission, result.is_ok())
+                    }
+                }
+                cx.notify();
+            });
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
@@ -1065,7 +1098,7 @@ impl Composer {
                         if sends_attachments {
                             this.picked_interaction_mode = None;
                         }
-                        if clears_input && (!tracked || this.binding.is_some()) {
+                        if clears_input && this.binding.is_some() {
                             this.input.update(cx, |input, cx| input.clean(window, cx));
                         }
                         this.sync(window, cx);
