@@ -52,6 +52,27 @@ The server tree must include its production dependencies for the target platform
 runtime. Installed builds use the existing desktop's T3 home (`~/.t3`, or `T3CODE_HOME`) and start the
 server in the user's home, outside the resource directory. Release binaries require a bundle unless
 `T3_REPO_ROOT` is explicit; missing resources fail rather than falling back to a build-machine path.
-This runtime resolver does not generate installers.
+
+Assemble a portable directory (or a `.app` on macOS) from a compiled native executable, a prepared
+server runtime, and an unpacked Node distribution for the same platform and architecture:
+
+```sh
+node apps/desktop-gpui/scripts/bundle.mjs \
+  --desktop apps/desktop-gpui/target/release/t3-desktop \
+  --server-root /path/to/prepared-server \
+  --node-root /path/to/node-distribution \
+  --output /path/to/new/T3-Code
+```
+
+The prepared server tree contains `apps/server/dist` from the existing server build, including
+`client/index.html` for remote clients, and a physical production `node_modules` tree. Workspace
+symlinks are rejected; use a standalone production install for the target platform rather than the
+checkout's dependencies. Only those runtime directories are copied, excluding checkout state and
+configuration. The Node distribution must include its `LICENSE`. Existing outputs are never replaced.
+On Windows, pass the `.exe` as `--desktop`; on macOS, use an output ending in `.app`. The version
+defaults to the native crate's version and can be set with `--version`.
+
+This assembles resources; it does not build the server, fetch Node, sign an app, or generate installers.
+Run its focused checks with `node --test apps/desktop-gpui/scripts/bundle.test.mjs`.
 
 The `t3-host` integration test also starts the real server, with its data under `target/`.
