@@ -1417,6 +1417,21 @@ impl Render for Composer {
                     .w_full()
                     .max_w(CONTENT_WIDTH)
                     .gap_1()
+                    .when_some(self.env.read(cx).draft_storage_error.clone(), |column, error| {
+                        column.child(
+                            h_flex().gap_2().child(
+                                div().px_1().text_xs().text_color(danger).child(error)
+                            ).child(
+                                Button::new("retry-draft-storage")
+                                    .label("Retry")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.env.update(cx, |env, cx| env.retry_draft_storage(cx));
+                                    }))
+                            )
+                        )
+                    })
                     .when_some(self.error.clone(), |column, error| {
                         column.child(div().px_1().text_xs().text_color(danger).child(error))
                     })

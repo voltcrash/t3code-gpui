@@ -1,12 +1,13 @@
 //! Message text outlives its view, but neither transcripts nor sockets are retained.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Drafts {
     revision: u64,
     text: HashMap<String, (u64, String)>,
     pending: HashMap<String, u64>,
+    touched: HashSet<String>,
 }
 
 pub struct Submission {
@@ -28,11 +29,33 @@ impl Drafts {
             return;
         }
         self.revision += 1;
+        self.touched.insert(thread_id.to_owned());
         if text.is_empty() {
             self.text.remove(thread_id);
         } else {
             self.text
                 .insert(thread_id.into(), (self.revision, text.into()));
+        }
+    }
+
+    pub fn snapshot(&self) -> BTreeMap<String, String> {
+        self.text
+            .iter()
+            .map(|(id, (_, text))| (id.clone(), text.clone()))
+            .collect()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn restore_missing(&mut self, saved: &BTreeMap<String, String>) {
+        for (id, text) in saved {
+            // A failed load can be retried after typing. Explicit clears must
+            // remain empty instead of resurrecting an older saved draft.
+            if !self.touched.contains(id) {
+                self.edit(id, text);
+            }
         }
     }
 
@@ -70,6 +93,7 @@ impl Drafts {
                 == submission.clear_revision
         {
             self.text.remove(&submission.thread_id);
+            self.revision += 1;
         }
     }
 }
@@ -129,5 +153,44 @@ mod tests {
         let answer = drafts.begin("thread", false).unwrap();
         drafts.finish(answer, true);
         assert_eq!(drafts.text("thread"), "Old message");
+    }
+
+    #[test]
+    fn retrying_a_load_keeps_new_text_and_explicit_clears() {
+        let mut drafts = Drafts::default();
+        drafts.edit("edited", "New local text");
+        drafts.edit("cleared", "Delete this");
+        drafts.edit("cleared", "");
+        drafts.restore_missing(&BTreeMap::from([
+            ("edited".into(), "Old text".into()),
+            ("cleared".into(), "Old text".into()),
+            ("untouched".into(), "Recovered text 🌱\nSecond line".into()),
+        ]));
+        assert_eq!(drafts.text("edited"), "New local text");
+        assert_eq!(drafts.text("cleared"), "");
+        assert_eq!(drafts.text("untouched"), "Recovered text 🌱\nSecond line");
+        assert!(!drafts.snapshot().contains_key("cleared"));
+    }
+
+    #[test]
+    fn snapshots_restore_text_without_restoring_inflight_commands() {
+        let mut drafts = Drafts::default();
+        drafts.edit("thread", "Unsent text");
+        let _submission = drafts.begin("thread", true).unwrap();
+        let mut restored = Drafts::default();
+        restored.restore_missing(&drafts.snapshot());
+        assert_eq!(restored.text("thread"), "Unsent text");
+        assert!(!restored.busy("thread"));
+    }
+
+    #[test]
+    fn acceptance_after_saving_an_inflight_draft_marks_the_cleared_text_for_saving() {
+        let mut drafts = Drafts::default();
+        drafts.edit("thread", "Submitted text");
+        let submission = drafts.begin("thread", true).unwrap();
+        let saved_revision = drafts.revision();
+        drafts.finish(submission, true);
+        assert!(drafts.snapshot().is_empty());
+        assert!(drafts.revision() > saved_revision);
     }
 }
