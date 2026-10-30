@@ -44,6 +44,8 @@ actions!(
         FindInThread,
         ToggleChanges,
         TogglePlanMode,
+        ToggleWorkspace,
+        ChooseBranch,
         ToggleSidebar,
         ToggleThreadPin,
         ToggleThreadSettlement,
@@ -99,6 +101,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, Some(CONTEXT)),
         KeyBinding::new("secondary-d", ToggleChanges, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-a", TogglePlanMode, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-x", ToggleWorkspace, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-g", ChooseBranch, Some(CONTEXT)),
         KeyBinding::new(
             "shift-tab",
             TogglePlanMode,
@@ -787,7 +791,7 @@ impl Workspace {
         }
         let env = self.env.read(cx);
         let (project_id, thread) = if let Some((draft, _)) = &self.draft {
-            (draft.read(cx).project_id(), None)
+            return draft.read(cx).editor_cwd(cx);
         } else {
             let id = self.sidebar.read(cx).selected()?;
             let thread = env.thread(id)?;
@@ -1222,6 +1226,26 @@ impl Render for Workspace {
                     cx,
                 )
             }))
+            .on_action(cx.listener(|this, _: &ToggleWorkspace, window, cx| {
+                this.close_palette(window, cx);
+                if this.settings.is_none()
+                    && this.project_picker.is_none()
+                    && !this.actions.read(cx).has_dialog()
+                    && let Some((draft, _)) = &this.draft
+                {
+                    draft.update(cx, |draft, cx| draft.toggle_workspace(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ChooseBranch, window, cx| {
+                this.close_palette(window, cx);
+                if this.settings.is_none()
+                    && this.project_picker.is_none()
+                    && !this.actions.read(cx).has_dialog()
+                    && let Some((draft, _)) = &this.draft
+                {
+                    draft.update(cx, |draft, cx| draft.open_branches(window, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.travel(false, window, cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.travel(true, window, cx)))
             .on_action(
@@ -1341,6 +1365,11 @@ impl Render for Workspace {
                     can_plan,
                     self.sidebar_visible,
                     self.can_open_editor(cx),
+                    self.settings.is_none()
+                        && self
+                            .draft
+                            .as_ref()
+                            .is_some_and(|(draft, _)| draft.read(cx).can_choose_workspace(cx)),
                 )
                 .on_confirm(move |_, window, cx| {
                     let _ = this.update(cx, |this, cx| this.close_palette(window, cx));

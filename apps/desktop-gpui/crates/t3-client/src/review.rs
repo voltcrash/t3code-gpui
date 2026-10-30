@@ -268,6 +268,7 @@ mod tests {
     fn review_uses_the_environment_worktree_without_resolving_paths_locally() {
         let mut shell = ShellState::default();
         shell.projects.push(crate::shell::Project {
+            default_thread_env_mode: None,
             id: "project".into(),
             title: "Remote project".into(),
             workspace_root: "D:\\project".into(),

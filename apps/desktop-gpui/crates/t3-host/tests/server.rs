@@ -288,6 +288,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         "every provider snapshot decodes"
     );
     let (_, launch) = t3_client::commands::launch_thread(&t3_client::commands::NewThread {
+        workspace: &Default::default(),
         project_id: "project-that-does-not-exist",
         model_selection: &json!({ "instanceId": "codex", "model": "gpt-6-astra" }),
         runtime_mode: "full-access",
@@ -302,6 +303,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     assert!(matches!(rejected, RpcError::Failure(_)), "{rejected:?}");
 
     verifies_project_lifecycle(&client, &home).await;
+    verifies_workspace_selection(&client, &review_workspace).await;
 
     // The socket survives an interrupted stream and a failed call.
     let again: Value = client.call("server.getConfig", &json!({})).await.unwrap();
@@ -558,6 +560,7 @@ async fn verifies_attachments(
         .await
         .unwrap();
     let (_, launch) = t3_client::commands::launch_thread(&t3_client::commands::NewThread {
+        workspace: &Default::default(),
         project_id: "project-that-does-not-exist",
         model_selection: &json!({"instanceId":"codex", "model":"gpt-6-astra"}),
         runtime_mode: "approval-required",
@@ -1294,4 +1297,112 @@ async fn verifies_tasks(client: &RpcClient) {
     assert_eq!(tasks.steps.len(), 3);
     assert_eq!(tasks.current(), "Implement native task progress");
     assert_eq!(tasks.steps[0].duration_ms, Some(1234));
+}
+
+async fn verifies_workspace_selection(client: &RpcClient, cwd: &std::path::Path) {
+    use t3_client::{commands, workspaces};
+    let branches = workspaces::branches(client, cwd.to_str().unwrap(), "", None)
+        .await
+        .unwrap();
+    assert!(branches.is_repo);
+    let main = branches
+        .refs
+        .iter()
+        .find(|branch| branch.name == "gpui")
+        .unwrap();
+    let new_worktree = workspaces::select_branch(
+        cwd.to_str().unwrap(),
+        &workspaces::Strategy::Worktree {
+            base_ref: "gpui".into(),
+            start_from_origin: false,
+        },
+        main,
+    );
+    assert!(new_worktree.checkout_cwd.is_none());
+    client
+        .call::<_, Value>(
+            "vcs.createRef",
+            &json!({"cwd":cwd,"refName":"native-choice","switchRef":false}),
+        )
+        .await
+        .unwrap();
+    let refs = workspaces::branches(client, cwd.to_str().unwrap(), "native-choice", None)
+        .await
+        .unwrap();
+    let branch = refs
+        .refs
+        .iter()
+        .find(|branch| branch.name == "native-choice")
+        .unwrap();
+    let selected = workspaces::select_branch(
+        cwd.to_str().unwrap(),
+        &workspaces::Strategy::default(),
+        branch,
+    );
+    let checkout_cwd = selected.checkout_cwd.unwrap();
+    client
+        .call::<_, Value>(
+            "vcs.switchRef",
+            &json!({"cwd":checkout_cwd,"refName":branch.name}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture_git(cwd, &["branch", "--show-current"]).await.trim(),
+        "native-choice"
+    );
+    client
+        .call::<_, Value>(
+            "vcs.switchRef",
+            &json!({"cwd":cwd,"refName":"review-fixture"}),
+        )
+        .await
+        .unwrap();
+    let model = json!({"instanceId":"codex","model":"gpt-6-astra"});
+    let (id, mut input) = commands::launch_thread(&commands::NewThread {
+        workspace: &new_worktree.strategy,
+        project_id: "history-project",
+        model_selection: &model,
+        runtime_mode: "full-access",
+        interaction_mode: "default",
+        text: "Workspace fixture",
+        attachments: &[],
+    });
+    input.as_object_mut().unwrap().remove("initialMessage");
+    input["generateTitle"] = false.into();
+    client
+        .call::<_, Value>(commands::LAUNCH_THREAD, &input)
+        .await
+        .unwrap();
+    let mut stream = client.subscribe::<_, ThreadStreamItem>(
+        t3_client::thread::SUBSCRIBE,
+        &t3_client::thread::subscribe_input(&id, None),
+    );
+    let mut worktree = None;
+    while let Some(item) = stream.next().await {
+        match item.unwrap() {
+            ThreadStreamItem::Snapshot { projection, .. } => {
+                worktree = projection.thread["worktreePath"]
+                    .as_str()
+                    .map(str::to_owned);
+            }
+            ThreadStreamItem::Event { event, .. } => {
+                if let Some(path) = event.payload["worktreePath"].as_str() {
+                    worktree = Some(path.into());
+                }
+            }
+            _ => {}
+        }
+        if worktree.is_some() {
+            break;
+        }
+    }
+    let worktree =
+        std::path::PathBuf::from(worktree.expect("workspace preparation records the worktree"));
+    assert!(worktree.join(".git").is_file());
+    assert!(worktree.join("app.rs").is_file());
+    assert_eq!(
+        fixture_git(cwd, &["branch", "--show-current"]).await.trim(),
+        "review-fixture"
+    );
 }

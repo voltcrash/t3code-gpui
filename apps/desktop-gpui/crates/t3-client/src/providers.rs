@@ -178,6 +178,7 @@ pub struct Settings {
     pub project_settings_overrides: Map<String, Value>,
     pub default_model_selection: Option<Value>,
     pub default_runtime_mode: Option<String>,
+    pub default_thread_env_mode: Option<String>,
     #[serde(default)]
     pub project_settings_folded: bool,
 }

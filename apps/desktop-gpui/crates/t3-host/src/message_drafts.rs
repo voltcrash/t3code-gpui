@@ -91,6 +91,7 @@ mod tests {
         saved.new_threads.insert(
             "draft".into(),
             t3_client::new_thread_drafts::SavedDraft {
+                workspace: None,
                 project_id: "first".into(),
                 picks: Default::default(),
                 text: "Different project draft".into(),

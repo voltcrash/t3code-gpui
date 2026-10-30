@@ -26,6 +26,7 @@ pub struct DraftView {
     defaults: Option<NewThreadDefaults>,
     loaded: bool,
     composer: Entity<Composer>,
+    workspace: Entity<crate::draft_workspace::DraftWorkspace>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -38,16 +39,34 @@ impl DraftView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let workspace = cx.new(|cx| {
+            crate::draft_workspace::DraftWorkspace::new(
+                env.clone(),
+                id.clone(),
+                project_id.clone(),
+                window,
+                cx,
+            )
+        });
         let target = Target::Draft(NewThread {
             id: id.clone(),
             project_id: project_id.clone(),
             defaults: None,
+            workspace: Default::default(),
             loaded: false,
         });
         let composer =
             cx.new(|cx| Composer::new(env.clone(), target, None, attachments, window, cx));
         composer.update(cx, |composer, cx| composer.focus(window, cx));
         let subscriptions = vec![
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, _, _: &crate::draft_workspace::Changed, window, cx| {
+                    this.sync_composer(window, cx);
+                    cx.notify();
+                },
+            ),
             cx.subscribe(&composer, |_, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Launched(id) => cx.emit(DraftEvent::Launched(id.clone())),
             }),
@@ -62,6 +81,7 @@ impl DraftView {
             defaults: None,
             loaded: false,
             composer,
+            workspace,
             _subscriptions: subscriptions,
         };
         view.load(window, cx);
@@ -79,6 +99,34 @@ impl DraftView {
 
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+
+    pub fn can_choose_workspace(&self, cx: &App) -> bool {
+        self.workspace.read(cx).can_choose(cx)
+    }
+
+    pub fn toggle_workspace(&mut self, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.toggle(cx));
+    }
+
+    pub fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.open_branches(window, cx));
+    }
+
+    pub fn editor_cwd(&self, cx: &App) -> Option<String> {
+        match self.workspace.read(cx).strategy(cx) {
+            t3_client::workspaces::Strategy::ExistingWorktree { worktree_path, .. } => {
+                Some(worktree_path)
+            }
+            _ => self
+                .env
+                .read(cx)
+                .shell
+                .project(&self.project_id)
+                .map(|project| project.workspace_root.clone()),
+        }
     }
 
     pub fn can_toggle_plan_mode(&self, cx: &App) -> bool {
@@ -100,6 +148,9 @@ impl DraftView {
                 cx.notify();
             });
             self.project_id = project_id;
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.set_project(self.project_id.clone(), window, cx)
+            });
             self.defaults = None;
             self.loaded = false;
             self.sync_composer(window, cx);
@@ -142,7 +193,8 @@ impl DraftView {
             id: self.id.clone(),
             project_id: self.project_id.clone(),
             defaults: self.defaults.clone(),
-            loaded: self.loaded,
+            loaded: self.loaded && self.workspace.read(cx).ready(),
+            workspace: Box::new(self.workspace.read(cx).strategy(cx)),
         };
         self.composer.update(cx, |composer, cx| {
             composer.set_new_thread(new_thread, window, cx)
@@ -194,7 +246,7 @@ impl Render for DraftView {
             });
 
         let summary: SharedString = match (&self.defaults, self.loaded) {
-            (Some(_), _) => "Local".into(),
+            (Some(_), _) => self.workspace.read(cx).strategy(cx).label().into(),
             (None, false) => "Loading providers…".into(),
             (None, true) => "No provider is ready to run this thread".into(),
         };
@@ -231,6 +283,14 @@ impl Render for DraftView {
                             })
                             .child(summary),
                     ),
+            )
+            .child(
+                h_flex().w_full().justify_center().px_6().child(
+                    div()
+                        .w_full()
+                        .max_w(crate::appearance::CONTENT_WIDTH)
+                        .child(self.workspace.clone()),
+                ),
             )
             .child(self.composer.clone())
     }

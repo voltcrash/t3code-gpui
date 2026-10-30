@@ -22,6 +22,8 @@ pub struct Project {
     /// Legacy field; the server folds it into the project's settings override.
     #[serde(default)]
     pub default_model_selection: Option<serde_json::Value>,
+    #[serde(default)]
+    pub default_thread_env_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

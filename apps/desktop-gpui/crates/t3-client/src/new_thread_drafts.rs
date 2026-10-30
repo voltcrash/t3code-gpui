@@ -13,6 +13,8 @@ pub struct SavedDraft {
     #[serde(default)]
     pub picks: message_drafts::Picks,
     pub order: u64,
+    #[serde(default)]
+    pub workspace: Option<crate::workspaces::Strategy>,
 }
 
 #[derive(Clone)]
@@ -27,6 +29,7 @@ pub struct Drafts {
     sessions: BTreeMap<String, (String, u64)>,
     touched: HashSet<String>,
     attachments: HashSet<String>,
+    workspaces: BTreeMap<String, crate::workspaces::Strategy>,
     revision: u64,
     order: u64,
 }
@@ -54,9 +57,26 @@ impl Drafts {
             && project != project_id
         {
             *project = project_id.into();
+            self.workspaces.remove(id);
             self.touched.insert(id.into());
             self.revision += 1;
         }
+    }
+
+    pub fn workspace(&self, id: &str) -> Option<&crate::workspaces::Strategy> {
+        self.workspaces.get(id)
+    }
+
+    pub fn set_workspace(&mut self, id: &str, workspace: crate::workspaces::Strategy) {
+        if !self.sessions.contains_key(id)
+            || self.messages.busy(id)
+            || self.workspaces.get(id) == Some(&workspace)
+        {
+            return;
+        }
+        self.workspaces.insert(id.into(), workspace);
+        self.touched.insert(id.into());
+        self.revision += 1;
     }
 
     pub fn remove(&mut self, id: &str) -> bool {
@@ -66,6 +86,7 @@ impl Drafts {
         self.messages.edit(id, "");
         self.messages.set_picks(id, Default::default());
         self.attachments.remove(id);
+        self.workspaces.remove(id);
         self.touched.insert(id.into());
         self.revision += 1;
         true
@@ -76,6 +97,7 @@ impl Drafts {
         let saved = SavedDraft {
             project_id,
             order,
+            workspace: self.workspace(id).cloned(),
             text: self.messages.text(id).into(),
             picks: self.messages.picks(id).cloned().unwrap_or_default(),
         };
@@ -93,6 +115,9 @@ impl Drafts {
         let saved = &discarded.saved;
         self.sessions
             .insert(id.into(), (saved.project_id.clone(), saved.order));
+        if let Some(workspace) = &saved.workspace {
+            self.workspaces.insert(id.into(), workspace.clone());
+        }
         self.messages.edit(id, &saved.text);
         self.messages.set_picks(id, saved.picks.clone());
         if discarded.has_attachments {
@@ -135,13 +160,19 @@ impl Drafts {
         sessions.into_iter().map(|(id, _)| id.as_str()).collect()
     }
 
+    pub fn has_saved_content(&self, id: &str) -> bool {
+        !self.messages.text(id).is_empty()
+            || self.messages.picks(id).is_some()
+            || self.workspace(id).is_some()
+    }
+
     pub fn snapshot(&self) -> BTreeMap<String, SavedDraft> {
         self.sessions
             .iter()
             .filter_map(|(id, (project_id, order))| {
                 let text = self.messages.text(id);
                 let picks = self.messages.picks(id).cloned().unwrap_or_default();
-                (!text.is_empty() || picks != message_drafts::Picks::default()).then(|| {
+                self.has_saved_content(id).then(|| {
                     (
                         id.clone(),
                         SavedDraft {
@@ -149,6 +180,7 @@ impl Drafts {
                             text: text.into(),
                             picks,
                             order: *order,
+                            workspace: self.workspace(id).cloned(),
                         },
                     )
                 })
@@ -164,6 +196,9 @@ impl Drafts {
             }
             self.sessions
                 .insert(id.clone(), (draft.project_id.clone(), draft.order));
+            if let Some(workspace) = &draft.workspace {
+                self.workspaces.insert(id.clone(), workspace.clone());
+            }
             self.messages.edit(id, &draft.text);
             self.messages.set_picks(id, draft.picks.clone());
             self.revision += 1;
@@ -226,14 +261,29 @@ mod tests {
             ..Default::default()
         };
         drafts.messages.set_picks(&id, picks.clone());
+        let workspace = crate::workspaces::Strategy::Worktree {
+            base_ref: "release".into(),
+            start_from_origin: true,
+        };
+        drafts.set_workspace(&id, workspace.clone());
+        drafts.messages.set_picks(&id, Default::default());
+        assert!(
+            drafts.has_saved_content(&id),
+            "workspace-only drafts stay visible"
+        );
+        drafts.messages.set_picks(&id, picks.clone());
         let mut restored = Drafts::default();
         restored.restore_missing(&drafts.snapshot());
         assert_eq!(restored.messages.picks(&id), Some(&picks));
+        assert_eq!(restored.workspace(&id), Some(&workspace));
         let discarded = drafts.discard(&id).unwrap();
         assert!(drafts.messages.picks(&id).is_none());
         drafts.restore_discarded(&id, &discarded);
         assert_eq!(drafts.messages.picks(&id), Some(&picks));
+        assert_eq!(drafts.workspace(&id), Some(&workspace));
         let submission = drafts.messages.begin(&id, true).unwrap();
+        drafts.set_workspace(&id, Default::default());
+        assert_eq!(drafts.workspace(&id), Some(&workspace));
         drafts.messages.set_picks(
             &id,
             message_drafts::Picks {
@@ -243,6 +293,8 @@ mod tests {
         );
         drafts.finish(&id, submission, true);
         assert_eq!(drafts.project(&id), Some("project"));
+        drafts.set_project(&id, "another-project");
+        assert_eq!(drafts.workspace(&id), None);
     }
 
     #[test]

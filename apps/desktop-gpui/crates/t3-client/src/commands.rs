@@ -185,6 +185,7 @@ pub fn title_seed(text: &str) -> String {
 }
 
 pub struct NewThread<'a> {
+    pub workspace: &'a crate::workspaces::Strategy,
     pub project_id: &'a str,
     pub model_selection: &'a Value,
     pub runtime_mode: &'a str,
@@ -207,7 +208,7 @@ pub fn launch_thread(thread: &NewThread<'_>) -> (String, Value) {
         "modelSelection": thread.model_selection,
         "runtimeMode": thread.runtime_mode,
         "interactionMode": thread.interaction_mode,
-        "workspaceStrategy": { "type": "root" },
+        "workspaceStrategy": thread.workspace,
         "initialMessage": {
             "messageId": new_id(),
             "text": thread.text,
