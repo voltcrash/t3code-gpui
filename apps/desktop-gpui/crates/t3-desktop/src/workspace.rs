@@ -45,6 +45,8 @@ actions!(
         ToggleSidebar,
         ToggleThreadPin,
         ToggleThreadSettlement,
+        GoBack,
+        GoForward,
         PreviousThread,
         NextThread
     ]
@@ -86,6 +88,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-shift-o", NewThread, Some(CONTEXT)),
         KeyBinding::new("secondary-n", NewThread, Some(CONTEXT)),
+        KeyBinding::new("secondary-[", GoBack, Some(CONTEXT)),
+        KeyBinding::new("secondary-]", GoForward, Some(CONTEXT)),
         KeyBinding::new("secondary-f", FindInThread, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-p", ToggleThreadPin, Some(CONTEXT)),
         KeyBinding::new("secondary-shift-s", ToggleThreadSettlement, Some(CONTEXT)),
@@ -112,6 +116,7 @@ pub struct Workspace {
     palette: Option<Entity<CommandState>>,
     palette_focus: FocusHandle,
     palette_return_focus: Option<FocusHandle>,
+    navigation: t3_client::navigation::History,
     zoom: f32,
     menu: Entity<AppMenuBar>,
     env: Entity<LocalEnvironment>,
@@ -185,6 +190,32 @@ impl Workspace {
         }
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.navigate(destination, window, cx));
+    }
+
+    fn travel(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        if self.settings.is_some()
+            || self.project_picker.is_some()
+            || self.actions.read(cx).has_dialog()
+        {
+            return;
+        }
+        use t3_client::navigation::Location;
+        let env = self.env.read(cx);
+        let destination = self.navigation.travel(forward, |location| match location {
+            Location::Thread(id) => env.thread(id).is_some(),
+            Location::Draft(id) => env
+                .new_thread_drafts
+                .project(id)
+                .is_some_and(|project| env.shell.project(project).is_some()),
+        });
+        match destination {
+            Some(Location::Thread(id)) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.select(id.into(), cx)),
+            Some(Location::Draft(id)) => self.resume_draft(id.into(), window, cx),
+            None => {}
+        }
     }
 
     fn thread_shortcut(
@@ -357,6 +388,7 @@ impl Workspace {
             palette: None,
             palette_focus: cx.focus_handle(),
             palette_return_focus: None,
+            navigation: Default::default(),
             zoom: 1.,
             menu: AppMenuBar::new(cx),
             env,
@@ -583,6 +615,8 @@ impl Workspace {
                 DraftEvent::AddProject => this.add_project(window, cx),
             },
         );
+        self.navigation
+            .visit(t3_client::navigation::Location::Draft(id.to_string()));
         self.thread = None;
         self.draft = Some((draft, subscription));
         self.sidebar
@@ -682,7 +716,9 @@ impl Workspace {
         self.project_picker = None;
         self.pending_project = None;
         let selected = self.sidebar.read(cx).selected().cloned();
-        if selected.is_some() {
+        if let Some(id) = &selected {
+            self.navigation
+                .visit(t3_client::navigation::Location::Thread(id.to_string()));
             self.draft = None;
         }
         let current = self.thread.as_ref().map(|view| view.read(cx).thread_id());
@@ -1065,6 +1101,8 @@ impl Render for Workspace {
                     cx,
                 )
             }))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| this.travel(false, window, cx)))
+            .on_action(cx.listener(|this, _: &GoForward, window, cx| this.travel(true, window, cx)))
             .on_action(cx.listener(|this, _: &NewThread, window, cx| this.new_thread(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)),
