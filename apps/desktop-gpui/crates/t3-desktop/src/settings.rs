@@ -13,8 +13,30 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use t3_client::provider_settings;
+use t3_client::{provider_settings, providers};
 use t3_host::preferences::Appearance;
+
+#[derive(Clone, Copy)]
+enum ThreadDefault {
+    Workspace,
+    Permissions,
+}
+
+impl ThreadDefault {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Workspace => "defaultThreadEnvMode",
+            Self::Permissions => "defaultRuntimeMode",
+        }
+    }
+
+    fn value(self, settings: &providers::Settings) -> Option<&str> {
+        match self {
+            Self::Workspace => settings.default_thread_env_mode.as_deref(),
+            Self::Permissions => settings.default_runtime_mode.as_deref(),
+        }
+    }
+}
 
 pub struct Closed;
 pub struct Settings {
@@ -23,8 +45,8 @@ pub struct Settings {
     env: Entity<LocalEnvironment>,
     saving_provider: Option<String>,
     provider_error: Option<SharedString>,
-    saving_workspace: bool,
-    workspace_error: Option<SharedString>,
+    saving_default: bool,
+    default_error: Option<SharedString>,
     _observe: Vec<Subscription>,
 }
 impl EventEmitter<Closed> for Settings {}
@@ -43,8 +65,8 @@ impl Settings {
             env,
             saving_provider: None,
             provider_error: None,
-            saving_workspace: false,
-            workspace_error: None,
+            saving_default: false,
+            default_error: None,
             focus,
             _observe: observe,
         }
@@ -101,39 +123,44 @@ impl Settings {
         cx.notify();
     }
 
-    fn set_workspace(&mut self, mode: Option<&'static str>, cx: &mut Context<Self>) {
-        if self.saving_workspace {
+    fn set_thread_default(
+        &mut self,
+        setting: ThreadDefault,
+        mode: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saving_default {
             return;
         }
         let env = self.env.read(cx);
         let (Some(rpc), Some(settings)) = (env.rpc.clone(), env.server.settings.as_ref()) else {
             return;
         };
-        if settings.default_thread_env_mode.as_deref() == mode {
+        if setting.value(settings) == mode {
             return;
         }
-        self.saving_workspace = true;
-        self.workspace_error = None;
+        self.saving_default = true;
+        self.default_error = None;
         let update = tokio_bridge::spawn(cx, async move {
             rpc.call::<_, t3_client::providers::Settings>(
                 "server.updateSettings",
-                &serde_json::json!({"patch":{"defaultThreadEnvMode":mode}}),
+                &serde_json::json!({"patch":{(setting.key()):mode}}),
             )
             .await
-            .map(|settings| settings.default_thread_env_mode.as_deref() == mode)
+            .map(|settings| setting.value(&settings) == mode)
         });
         cx.spawn(async move |this, cx| {
             let error = match update.await {
                 Ok(Ok(true)) => None,
-                Ok(Ok(false)) => Some("The server did not apply the workspace setting.".to_owned()),
+                Ok(Ok(false)) => Some("The server did not apply the new thread setting.".to_owned()),
                 Ok(Err(error)) => Some(error.detail()),
                 Err(error) => Some(error.to_string()),
             };
             let _ = this.update(cx, |this, cx| {
-                this.saving_workspace = false;
-                this.workspace_error = error.map(|error| {
-                    tracing::warn!(%error, "saving workspace default failed");
-                    "Could not save the workspace default. Try again.".into()
+                this.saving_default = false;
+                this.default_error = error.map(|error| {
+                    tracing::warn!(%error, setting = setting.key(), "saving new thread default failed");
+                    "Could not save the new thread default. Try again.".into()
                 });
                 cx.notify();
             });
@@ -142,17 +169,65 @@ impl Settings {
         cx.notify();
     }
 
-    fn workspace_section(&self, cx: &Context<Self>) -> AnyElement {
+    fn new_threads_section(&self, cx: &Context<Self>) -> AnyElement {
         let env = self.env.read(cx);
         let settings = env.server.settings.as_ref();
         let mode = settings.and_then(|settings| settings.default_thread_env_mode.as_deref());
         let is_worktree = mode == Some("worktree");
-        let disabled = env.rpc.is_none() || settings.is_none() || self.saving_workspace;
+        let permissions = settings
+            .and_then(|settings| settings.default_runtime_mode.as_deref())
+            .unwrap_or(providers::DEFAULT_RUNTIME_MODE);
+        let (permissions_label, permissions_description) =
+            providers::runtime_mode_label(permissions);
+        let permissions_changed = permissions != providers::DEFAULT_RUNTIME_MODE;
+        let permissions = permissions.to_owned();
+        let target = cx.weak_entity();
+        let disabled = env.rpc.is_none() || settings.is_none() || self.saving_default;
         let local = cx.weak_entity();
         let worktree = local.clone();
         v_flex()
             .gap_2()
             .child(div().text_lg().font_semibold().child("New threads"))
+            .child(
+                h_flex().w_full().gap_4().py_3()
+                    .child(v_flex().flex_1().min_w_0().gap_1()
+                        .child(div().text_sm().font_medium().child("Permissions"))
+                        .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                            .child("Default permissions for new threads. Projects can override them.")))
+                    .child(Button::new("permissions-default")
+                        .label(permissions_label)
+                        .tooltip(permissions_description)
+                        .accessibility_label("Default permissions")
+                        .small()
+                        .disabled(disabled)
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for mode in providers::runtime_modes_for(None) {
+                                let (label, _) = providers::runtime_mode_label(mode);
+                                let target = target.clone();
+                                menu = menu.item(PopupMenuItem::new(label)
+                                    .checked(mode == permissions)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = target.update(cx, |this, cx| {
+                                            this.set_thread_default(ThreadDefault::Permissions, Some(mode), cx);
+                                        });
+                                    }));
+                            }
+                            menu
+                        }))
+                    .when(permissions_changed, |row| row.child(
+                        Button::new("reset-permissions-default")
+                            .label("Reset")
+                            .accessibility_label("Reset default permissions")
+                            .tooltip("Use Full access for new threads")
+                            .small()
+                            .ghost()
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_thread_default(ThreadDefault::Permissions, Some(providers::DEFAULT_RUNTIME_MODE), cx);
+                            })),
+                    )),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -171,11 +246,11 @@ impl Settings {
                         .dropdown_menu(move |menu, _, _| {
                             menu.item(PopupMenuItem::new("Local").checked(!is_worktree)
                                 .on_click({ let local = local.clone(); move |_, _, cx| {
-                                    let _ = local.update(cx, |this, cx| this.set_workspace(Some("local"), cx));
+                                    let _ = local.update(cx, |this, cx| this.set_thread_default(ThreadDefault::Workspace, Some("local"), cx));
                                 }}))
                                 .item(PopupMenuItem::new("New worktree").checked(is_worktree)
                                     .on_click({ let worktree = worktree.clone(); move |_, _, cx| {
-                                        let _ = worktree.update(cx, |this, cx| this.set_workspace(Some("worktree"), cx));
+                                        let _ = worktree.update(cx, |this, cx| this.set_thread_default(ThreadDefault::Workspace, Some("worktree"), cx));
                                     }}))
                         }))
                     .when(mode.is_some(), |row| row.child(
@@ -186,13 +261,13 @@ impl Settings {
                             .small()
                             .ghost()
                             .disabled(disabled)
-                            .on_click(cx.listener(|this, _, _, cx| this.set_workspace(None, cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.set_thread_default(ThreadDefault::Workspace, None, cx))),
                     )),
             )
-            .when(self.saving_workspace, |section| section.child(
-                div().text_xs().text_color(cx.theme().muted_foreground).child("Saving workspace…"),
+            .when(self.saving_default, |section| section.child(
+                div().text_xs().text_color(cx.theme().muted_foreground).child("Saving new thread defaults…"),
             ))
-            .when_some(self.workspace_error.clone(), |section, error| section.child(
+            .when_some(self.default_error.clone(), |section, error| section.child(
                 div().text_xs().text_color(cx.theme().danger).child(error),
             ))
             .into_any_element()
@@ -426,7 +501,7 @@ impl Render for Settings {
                                         ),
                                     ),
                             )
-                            .child(self.workspace_section(cx))
+                            .child(self.new_threads_section(cx))
                             .child(self.providers_section(cx))
                             .when(cfg!(target_os = "linux"), |column| column.child(
                                 v_flex().gap_2()
