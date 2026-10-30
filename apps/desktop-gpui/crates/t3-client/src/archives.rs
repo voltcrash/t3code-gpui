@@ -1,11 +1,10 @@
-//! Archived threads have their own subscription and sequence, independent of
-//! the active shell. Subscribe only when the archive is first opened.
+//! Archived threads load on demand and follow changes from the shared shell stream.
 
-use crate::shell::ThreadShell;
+use crate::shell::{ShellStreamItem, ThreadLocation, ThreadShell};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-pub const SUBSCRIBE: &str = "orchestration.subscribeArchivedShell";
+pub const GET_SNAPSHOT: &str = "orchestration.getArchivedShellSnapshot";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,9 +33,65 @@ pub enum StreamItem {
 pub struct State {
     pub sequence: Option<u64>,
     pub threads: HashMap<String, ThreadShell>,
+    pending: Option<Vec<StreamItem>>,
 }
 
 impl State {
+    pub fn begin_snapshot(&mut self) {
+        self.pending = Some(Vec::new());
+    }
+
+    pub fn cancel_snapshot(&mut self) {
+        self.pending = None;
+    }
+
+    pub fn finish_snapshot(&mut self, snapshot: Snapshot) {
+        // A shell event may arrive while the snapshot RPC is in flight.
+        let pending = self.pending.take().unwrap_or_default();
+        self.apply(StreamItem::Snapshot { snapshot });
+        for item in pending {
+            self.apply(item);
+        }
+    }
+
+    pub fn apply_shell(&mut self, item: &ShellStreamItem) -> bool {
+        let item = match item {
+            ShellStreamItem::ThreadUpdated {
+                sequence,
+                location,
+                thread,
+            } => {
+                if *location == ThreadLocation::Archive {
+                    StreamItem::Updated {
+                        sequence: *sequence,
+                        thread: thread.clone(),
+                    }
+                } else {
+                    StreamItem::Removed {
+                        sequence: *sequence,
+                        thread_id: thread.id.clone(),
+                    }
+                }
+            }
+            ShellStreamItem::ThreadRemoved {
+                sequence,
+                location: ThreadLocation::Archive,
+                thread_id,
+            } => StreamItem::Removed {
+                sequence: *sequence,
+                thread_id: thread_id.clone(),
+            },
+            _ => return false,
+        };
+        if let Some(pending) = &mut self.pending {
+            pending.push(item.clone());
+        }
+        if self.sequence.is_none() {
+            return false;
+        }
+        self.apply(item)
+    }
+
     pub fn apply(&mut self, item: StreamItem) -> bool {
         let sequence = match item {
             StreamItem::Snapshot { snapshot } => {
@@ -78,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_owns_its_sequence_and_replaces_reconnect_snapshots() {
+    fn archive_replaces_snapshots_and_replays_newer_shell_updates() {
         let thread = json!({"id":"archived-1","projectId":"project-1","title":"Archived","status":"idle","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","archivedAt":"2026-01-01T00:00:00Z"});
         let mut state = State::default();
         assert!(state.apply(item(
@@ -99,6 +154,25 @@ mod tests {
         assert!(state.apply(item(
             json!({"kind":"snapshot","snapshot":{"snapshotSequence":20,"threads":[]}})
         )));
+        assert!(state.threads.is_empty());
+        state.begin_snapshot();
+        let update = serde_json::from_value(json!({"kind":"thread.updated","sequence":22,"location":"archive","thread":thread.clone()})).unwrap();
+        assert!(state.apply_shell(&update));
+        state.finish_snapshot(Snapshot {
+            snapshot_sequence: 21,
+            threads: vec![],
+        });
+        assert!(state.threads.contains_key("archived-1"));
+        state.begin_snapshot();
+        let restored = serde_json::from_value(
+            json!({"kind":"thread.updated","sequence":23,"location":"active","thread":thread.clone()}),
+        )
+        .unwrap();
+        assert!(state.apply_shell(&restored));
+        state.finish_snapshot(Snapshot {
+            snapshot_sequence: 22,
+            threads: vec![serde_json::from_value(thread).unwrap()],
+        });
         assert!(state.threads.is_empty());
     }
 }

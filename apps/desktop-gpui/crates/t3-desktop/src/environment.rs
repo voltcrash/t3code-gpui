@@ -58,6 +58,7 @@ pub struct LocalEnvironment {
     pub archives: t3_client::archives::State,
     pub archive_error: Option<SharedString>,
     archive_requested: bool,
+    archive_refresh_pending: bool,
     archive_task: Option<Task<()>>,
     /// Providers and settings, current while connected.
     pub server: ServerState,
@@ -85,33 +86,43 @@ impl LocalEnvironment {
         self.archive_task = Some(cx.spawn(async move |this, cx| {
             let mut retry = RETRY_INITIAL;
             loop {
-                let mut updates = rpc.subscribe::<_, t3_client::archives::StreamItem>(
-                    t3_client::archives::SUBSCRIBE,
-                    &json!({}),
-                );
-                while let Some(item) = updates.next().await {
-                    match item {
-                        Ok(item) => {
-                            retry = RETRY_INITIAL;
-                            if this
-                                .update(cx, |this, cx| {
-                                    this.archive_error = None;
-                                    if this.archives.apply(item) {
-                                        cx.notify();
-                                    }
-                                })
-                                .is_err()
-                            {
-                                return;
+                if this
+                    .update(cx, |this, _| {
+                        this.archive_refresh_pending = false;
+                        this.archives.begin_snapshot();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                match rpc
+                    .call::<_, t3_client::archives::Snapshot>(
+                        t3_client::archives::GET_SNAPSHOT,
+                        &json!({}),
+                    )
+                    .await
+                {
+                    Ok(snapshot) => {
+                        let refresh = this.update(cx, |this, cx| {
+                            this.archives.finish_snapshot(snapshot);
+                            this.archive_error = None;
+                            if !this.archive_refresh_pending {
+                                this.archive_task = None;
                             }
+                            cx.notify();
+                            this.archive_refresh_pending
+                        });
+                        if refresh.unwrap_or(false) {
+                            continue;
                         }
-                        Err(error) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.archive_error = Some(error.detail().into());
-                                cx.notify();
-                            });
-                            break;
-                        }
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.archives.cancel_snapshot();
+                            this.archive_error = Some(error.detail().into());
+                            cx.notify();
+                        });
                     }
                 }
                 if rpc.is_closed() {
@@ -258,6 +269,7 @@ impl LocalEnvironment {
             archives: Default::default(),
             archive_error: None,
             archive_requested: false,
+            archive_refresh_pending: false,
             archive_task: None,
             server: ServerState::default(),
             _run: run,
@@ -388,6 +400,17 @@ async fn run(
                             ShellStreamItem::ThreadUpdated { .. }
                                 | ShellStreamItem::ThreadRemoved { .. }
                         );
+                    if env.archive_requested {
+                        env.archives.apply_shell(&item);
+                        if snapshot {
+                            env.archive_task = None;
+                            env.load_archives(cx);
+                        } else if matches!(item, ShellStreamItem::ThreadRemoved { .. }) {
+                            // Archived changes arrive as removals from the active shell.
+                            env.archive_refresh_pending = true;
+                            env.load_archives(cx);
+                        }
+                    }
                     if env.shell.apply(item) {
                         if threads_changed {
                             let notices = env
@@ -410,21 +433,12 @@ async fn run(
     }
 }
 
-/// Subscribes before reading the settings so no update falls between them.
 async fn follow_config(
     this: WeakEntity<LocalEnvironment>,
     rpc: RpcClient,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
     let mut items = rpc.subscribe::<_, ConfigStreamItem>(config::SUBSCRIBE, &json!({}));
-    let settings = rpc
-        .call::<_, Value>(config::GET_SETTINGS, &json!({}))
-        .await?;
-    let settings = serde_json::from_value(settings)?;
-    this.update(cx, |env, cx| {
-        env.server.settings = Some(settings);
-        cx.notify();
-    })?;
     while let Some(item) = items.next().await {
         let item = item?;
         this.update(cx, |env, cx| {

@@ -1,7 +1,4 @@
 //! Provider status and settings, kept current by `subscribeServerConfig`.
-//!
-//! Its snapshot carries the providers but not the settings, so a client reads
-//! `server.getSettings` once and then follows `settingsUpdated`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,7 +6,6 @@ use serde_json::Value;
 use crate::providers::{self, Provider, Settings};
 
 pub const SUBSCRIBE: &str = "subscribeServerConfig";
-pub const GET_SETTINGS: &str = "server.getSettings";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -28,7 +24,7 @@ pub enum ConfigStreamItem {
 pub struct ServerState {
     pub providers: Vec<Provider>,
     pub providers_loaded: bool,
-    /// `None` until `server.getSettings` answers.
+    /// `None` until a settings snapshot arrives.
     pub settings: Option<Settings>,
     pub thread_find: bool,
     pub thread_visited_tracking: bool,
@@ -46,6 +42,7 @@ impl ServerState {
                 self.thread_find_progressive = config["threadFindProgressive"] == true;
                 self.providers = providers::from_config(&config);
                 self.providers_loaded = true;
+                self.settings = serde_json::from_value(config["settings"].clone()).ok();
                 true
             }
             ConfigStreamItem::ProviderStatuses { payload } => {
@@ -81,12 +78,18 @@ mod tests {
 
     #[test]
     fn provider_updates_replace_the_list_and_keep_settings() {
-        let mut state = ServerState {
-            settings: Some(Settings::default()),
-            ..Default::default()
-        };
-        let snapshot = json!({ "version": 1, "type": "snapshot", "config": { "providers": [provider("codex")] } });
+        let mut state = ServerState::default();
+        let snapshot = json!({ "version": 1, "type": "snapshot", "config": { "providers": [provider("codex")], "settings": { "defaultRuntimeMode": "full-access" } } });
         assert!(state.apply(serde_json::from_value(snapshot).unwrap()));
+        assert_eq!(
+            state
+                .settings
+                .as_ref()
+                .unwrap()
+                .default_runtime_mode
+                .as_deref(),
+            Some("full-access")
+        );
         let update = json!({ "version": 1, "type": "providerStatuses", "payload": { "providers": [provider("claudeAgent")] } });
         assert!(state.apply(serde_json::from_value(update).unwrap()));
         assert_eq!(state.providers.len(), 1);
