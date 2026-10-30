@@ -8,8 +8,8 @@ use gpui_kit::*;
 use crate::desktop::{OpenSettings, ResetZoom, ToggleFullscreen, ZoomIn, ZoomOut};
 use crate::environment::LocalEnvironment;
 use crate::workspace::{
-    AddProject, FindInThread, NewThread, NextThread, PreviousThread, ToggleChanges, TogglePlanMode,
-    ToggleSidebar, ToggleThreadPin, ToggleThreadSettlement,
+    AddProject, FindInThread, GoBack, GoForward, NewThread, NextThread, PreviousThread,
+    ToggleChanges, TogglePlanMode, ToggleSidebar, ToggleThreadPin, ToggleThreadSettlement,
 };
 
 #[derive(Clone, PartialEq, Action)]
@@ -84,6 +84,8 @@ pub fn content(
     }
     let view = CommandGroup::new()
         .label("View")
+        .item(item("Back", IconName::ArrowLeft, GoBack))
+        .item(item("Forward", IconName::ArrowRight, GoForward))
         .item(item(
             if sidebar_visible {
                 "Hide sidebar"
