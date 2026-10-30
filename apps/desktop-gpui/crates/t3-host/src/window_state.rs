@@ -32,9 +32,27 @@ impl Rectangle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct View {
+    pub zoom: f32,
+    pub sidebar_visible: bool,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            zoom: 1.,
+            sidebar_visible: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     pub bounds: Rectangle,
     pub maximized: bool,
+    #[serde(default)]
+    pub view: View,
 }
 
 impl Placement {
@@ -53,7 +71,17 @@ impl Store {
 
     pub fn load(&self) -> io::Result<Option<Placement>> {
         match fs::read(&self.0) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+            Ok(bytes) => {
+                let mut placement: Option<Placement> =
+                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                if let Some(placement) = &mut placement
+                    && (!placement.view.zoom.is_finite()
+                        || !(0.5..=3.).contains(&placement.view.zoom))
+                {
+                    placement.view.zoom = 1.;
+                }
+                Ok(placement)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -87,6 +115,7 @@ mod tests {
         let placement = Placement {
             bounds: rect(-1800., 30., 1280., 820.),
             maximized: true,
+            view: View::default(),
         };
         let displays = [rect(0., 0., 1920., 1080.), rect(-1920., 0., 1920., 1080.)];
         assert_eq!(placement.on_displays(&displays), Some(placement));
@@ -107,12 +136,47 @@ mod tests {
             assert_eq!(
                 Placement {
                     bounds,
-                    maximized: false
+                    maximized: false,
+                    view: View::default(),
                 }
                 .on_displays(&displays),
                 None
             );
         }
+    }
+
+    #[test]
+    fn workspace_view_survives_restarts_and_legacy_files_keep_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "t3-view-state-{}",
+            super::super::preferences::nonce().unwrap()
+        ));
+        let store = Store::new(&root);
+        let mut placement: Placement = serde_json::from_value(serde_json::json!({
+            "bounds": {"x":20,"y":30,"width":1280,"height":820}, "maximized":false
+        }))
+        .unwrap();
+        assert_eq!(placement.view.zoom, 1.);
+        assert!(placement.view.sidebar_visible);
+        placement.view = View {
+            zoom: 1.44,
+            sidebar_visible: false,
+        };
+        store.save(placement).unwrap();
+        assert_eq!(
+            Store::new(&root).load().unwrap().unwrap().view,
+            placement.view
+        );
+        for zoom in [0., -1., 100.] {
+            let mut value = serde_json::to_value(placement).unwrap();
+            value["view"]["zoom"] = serde_json::json!(zoom);
+            fs::write(&store.0, serde_json::to_vec(&value).unwrap()).unwrap();
+            let restored = store.load().unwrap().unwrap();
+            assert_eq!(restored.view.zoom, 1.);
+            assert!(!restored.view.sidebar_visible);
+            assert_eq!(restored.bounds, placement.bounds);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -127,6 +191,7 @@ mod tests {
         let placement = Placement {
             bounds: rect(20., 30., 1280., 820.),
             maximized: true,
+            view: View::default(),
         };
         store.save(placement).unwrap();
         assert_eq!(Store::new(&root).load().unwrap(), Some(placement));
