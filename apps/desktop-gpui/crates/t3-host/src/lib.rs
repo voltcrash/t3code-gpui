@@ -2,6 +2,7 @@
 //! did in `apps/desktop/src/backend`. The server is unchanged: it receives the
 //! same `DesktopBackendBootstrap` envelope (`packages/contracts/src/desktopBootstrap.ts`).
 
+pub mod message_drafts;
 pub mod preferences;
 pub mod window_state;
 

@@ -40,6 +40,12 @@ pub struct LocalEnvironment {
     pub state: ConnectionState,
     pub shell: ShellState,
     pub message_drafts: t3_client::message_drafts::Drafts,
+    pub new_thread_drafts: t3_client::new_thread_drafts::Drafts,
+    pub question_drafts: t3_client::question_drafts::Drafts,
+    pub draft_storage_error: Option<SharedString>,
+    draft_store: t3_host::message_drafts::Store,
+    saved_drafts: Option<t3_host::message_drafts::SavedDrafts>,
+    saved_draft_revision: Option<(u64, (u64, u64), u64)>,
     notifications: t3_client::notifications::Tracker,
     pub capabilities: ShellCapabilities,
     /// The live socket, for views that open their own subscriptions.
@@ -118,7 +124,84 @@ impl LocalEnvironment {
         cx.notify();
     }
 
+    pub fn save_drafts(&mut self, cx: &mut Context<Self>) {
+        let Some(saved) = self.saved_drafts.as_mut() else {
+            return;
+        };
+        let revision = (
+            self.message_drafts.revision(),
+            self.new_thread_drafts.revision(),
+            self.question_drafts.revision(),
+        );
+        if self.saved_draft_revision == Some(revision) {
+            return;
+        }
+        saved.threads = self.message_drafts.snapshot();
+        saved.thread_picks = self.message_drafts.picks_snapshot();
+        saved.new_threads = self.new_thread_drafts.snapshot();
+        saved.question_answers = self.question_drafts.snapshot();
+        match self.draft_store.save(saved) {
+            Ok(()) => {
+                self.saved_draft_revision = Some(revision);
+                self.draft_storage_error = None;
+            }
+            Err(error) => {
+                tracing::error!("saving message drafts failed: {error}");
+                self.draft_storage_error =
+                    Some("Couldn't save unsent messages on this device.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn retry_draft_storage(&mut self, cx: &mut Context<Self>) {
+        if self.saved_drafts.is_none() {
+            match self.draft_store.load() {
+                Ok(saved) => {
+                    self.message_drafts.restore_missing(&saved.threads);
+                    self.message_drafts
+                        .restore_picks_missing(&saved.thread_picks);
+                    self.new_thread_drafts.restore_missing(&saved.new_threads);
+                    self.question_drafts
+                        .restore_missing(&saved.question_answers);
+                    self.saved_drafts = Some(saved);
+                }
+                Err(error) => {
+                    tracing::error!("loading message drafts failed: {error}");
+                    return;
+                }
+            }
+        }
+        self.save_drafts(cx);
+    }
+
     pub fn start(launch: BackendLaunch, cx: &mut Context<Self>) -> Self {
+        let draft_store = t3_host::message_drafts::Store::new(&launch.t3_home);
+        let mut message_drafts = t3_client::message_drafts::Drafts::default();
+        let mut new_thread_drafts = t3_client::new_thread_drafts::Drafts::default();
+        let mut question_drafts = t3_client::question_drafts::Drafts::default();
+        let (saved_drafts, saved_draft_revision, draft_storage_error) = match draft_store.load() {
+            Ok(saved) => {
+                message_drafts.restore_missing(&saved.threads);
+                message_drafts.restore_picks_missing(&saved.thread_picks);
+                new_thread_drafts.restore_missing(&saved.new_threads);
+                question_drafts.restore_missing(&saved.question_answers);
+                let revision = (
+                    message_drafts.revision(),
+                    new_thread_drafts.revision(),
+                    question_drafts.revision(),
+                );
+                (Some(saved), Some(revision), None)
+            }
+            Err(error) => {
+                tracing::error!("loading message drafts failed: {error}");
+                (
+                    None,
+                    None,
+                    Some("Couldn't restore unsent messages on this device.".into()),
+                )
+            }
+        };
         let backend = Arc::new(Mutex::new(None));
         let run = cx.spawn({
             let backend = backend.clone();
@@ -137,6 +220,7 @@ impl LocalEnvironment {
         let quit = cx.on_app_quit({
             let backend = backend.clone();
             move |this, cx| {
+                this.save_drafts(cx);
                 let attachments = this.attachments.clone();
                 let backend = backend.lock().expect("backend lock").take();
                 if let Some(backend) = backend {
@@ -157,7 +241,13 @@ impl LocalEnvironment {
         Self {
             state: ConnectionState::StartingServer,
             shell: ShellState::default(),
-            message_drafts: Default::default(),
+            message_drafts,
+            new_thread_drafts,
+            question_drafts,
+            draft_storage_error,
+            draft_store,
+            saved_drafts,
+            saved_draft_revision,
             notifications: Default::default(),
             capabilities: ShellCapabilities::default(),
             rpc: None,

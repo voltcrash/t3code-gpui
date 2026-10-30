@@ -113,6 +113,7 @@ impl AttachmentDraft {
                 }
             });
         }));
+        cx.notify();
     }
     pub fn add_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         for path in paths {
