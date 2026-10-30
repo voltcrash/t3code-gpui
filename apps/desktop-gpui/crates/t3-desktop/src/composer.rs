@@ -113,11 +113,17 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let restored: SharedString = match &target {
+            Target::Thread(id) => env.read(cx).message_drafts.text(id).to_owned().into(),
+            Target::Draft(_) => "".into(),
+        };
         let input = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            let mut input = TextareaState::new(window, cx)
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
-                .placeholder(PLACEHOLDER)
+                .placeholder(PLACEHOLDER);
+            input.set_value(restored, window, cx);
+            input
         });
         let attachments = cx.new(|_| AttachmentDraft::new(env.clone()));
         let mut subscriptions =
@@ -617,6 +623,20 @@ impl Composer {
 
     /// Points the text box and placeholder at whatever the mode needs.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.thread_id().map(str::to_owned) {
+            let drafts = &self.env.read(cx).message_drafts;
+            self.busy = drafts.busy(&id);
+            let message = drafts.text(&id);
+            if self.binding.is_some() {
+                if self.stashed_message.as_deref() != Some(message) {
+                    self.stashed_message = Some(message.to_owned().into());
+                }
+            } else if self.input.read(cx).value().as_ref() != message {
+                let message = message.to_owned();
+                self.input
+                    .update(cx, |input, cx| input.set_value(message, window, cx));
+            }
+        }
         let live_ids: Vec<&String> = self
             .requests
             .user_inputs
@@ -695,6 +715,10 @@ impl Composer {
                 draft.selected.clear();
             }
             draft.custom = Some(text);
+        } else if let Some(id) = self.thread_id().map(str::to_owned) {
+            let text = self.input.read(cx).value();
+            self.env
+                .update(cx, |env, _| env.message_drafts.edit(&id, &text));
         }
         cx.notify();
     }
@@ -973,6 +997,20 @@ impl Composer {
         let Some(rpc) = self.env.read(cx).rpc.clone() else {
             return;
         };
+        let tracked = self.thread_id().is_some();
+        let submission = if let Some(id) = self.thread_id().map(str::to_owned) {
+            let clears_text = clears_input && self.binding.is_none();
+            let Some(submission) = self.env.update(cx, |env, cx| {
+                let submission = env.message_drafts.begin(&id, clears_text);
+                cx.notify();
+                submission
+            }) else {
+                return;
+            };
+            Some(submission)
+        } else {
+            None
+        };
         self.busy = true;
         self.error = None;
         cx.notify();
@@ -998,11 +1036,19 @@ impl Composer {
             }
             Ok::<_, t3_client::RpcError>(())
         });
+        let env = self.env.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = match dispatched.await {
                 Ok(result) => result.map_err(|error| error.detail()),
                 Err(error) => Err(error.to_string()),
             };
+            // Finish against environment state even if navigation dropped this composer.
+            if let Some(submission) = submission {
+                env.update(cx, |env, cx| {
+                    env.message_drafts.finish(submission, result.is_ok());
+                    cx.notify();
+                });
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 if sends_attachments {
@@ -1016,9 +1062,10 @@ impl Composer {
                             this.attachments
                                 .update(cx, |attachments, cx| attachments.clear(cx));
                         }
-                        if clears_input {
+                        if clears_input && (!tracked || this.binding.is_some()) {
                             this.input.update(cx, |input, cx| input.clean(window, cx));
                         }
+                        this.sync(window, cx);
                         if let Some(thread_id) = launched {
                             cx.emit(ComposerEvent::Launched(thread_id));
                         }

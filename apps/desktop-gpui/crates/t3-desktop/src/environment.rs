@@ -39,6 +39,7 @@ pub enum ConnectionState {
 pub struct LocalEnvironment {
     pub state: ConnectionState,
     pub shell: ShellState,
+    pub message_drafts: t3_client::message_drafts::Drafts,
     notifications: t3_client::notifications::Tracker,
     pub capabilities: ShellCapabilities,
     /// The live socket, for views that open their own subscriptions.
@@ -156,6 +157,7 @@ impl LocalEnvironment {
         Self {
             state: ConnectionState::StartingServer,
             shell: ShellState::default(),
+            message_drafts: Default::default(),
             notifications: Default::default(),
             capabilities: ShellCapabilities::default(),
             rpc: None,
