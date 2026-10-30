@@ -284,6 +284,11 @@ impl Workspace {
         }
     }
     pub fn new(env: Entity<LocalEnvironment>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_window_bounds(window, |_, window, cx| {
+            crate::window_state::remember(window, cx);
+        })
+        .detach();
+
         let focus = cx.focus_handle();
         let actions = cx.new(|cx| ThreadActions::new(env.clone(), focus.clone(), window, cx));
         let sidebar = cx.new(|cx| Sidebar::new(env.clone(), actions.clone(), window, cx));

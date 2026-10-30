@@ -6473,6 +6473,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "notify-rust",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",
@@ -6483,6 +6484,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "x11rb",
 ]
 
 [[package]]

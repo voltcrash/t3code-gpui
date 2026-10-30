@@ -24,6 +24,7 @@ mod thread_view;
 mod thread_visit;
 mod tokio_bridge;
 mod tool_detail;
+mod window_state;
 mod workspace;
 
 use tracing_subscriber::EnvFilter;
@@ -55,6 +56,7 @@ fn main() -> anyhow::Result<()> {
         preferences::init(preference_store, loaded_preferences, cx);
         notifications::init(cx);
 
+        window_state::init(&launch.t3_home, cx);
         desktop::init(launch, cx);
     });
     Ok(())

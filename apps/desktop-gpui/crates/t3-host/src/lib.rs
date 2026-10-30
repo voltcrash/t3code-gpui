@@ -3,6 +3,7 @@
 //! same `DesktopBackendBootstrap` envelope (`packages/contracts/src/desktopBootstrap.ts`).
 
 pub mod preferences;
+pub mod window_state;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
