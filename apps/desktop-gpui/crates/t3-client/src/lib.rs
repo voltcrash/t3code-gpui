@@ -9,6 +9,7 @@ pub mod bootstrap_token;
 pub mod checkpoint;
 pub mod commands;
 pub mod config;
+pub mod editors;
 pub mod find;
 pub mod history;
 pub mod message_drafts;

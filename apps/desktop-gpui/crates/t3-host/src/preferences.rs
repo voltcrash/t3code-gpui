@@ -29,6 +29,7 @@ pub enum DiffLayout {
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub appearance: Appearance,
+    pub last_editor: Option<String>,
     pub desktop_notifications_enabled: bool,
     pub plan_mode_enabled: bool,
     pub confirm_thread_archive: bool,
@@ -44,6 +45,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             appearance: Appearance::System,
+            last_editor: None,
             desktop_notifications_enabled: false,
             plan_mode_enabled: false,
             confirm_thread_archive: false,
@@ -152,6 +154,7 @@ mod tests {
         let mut preferences = store.load().unwrap();
         assert_eq!(preferences.appearance, Appearance::Dark);
         assert!(preferences.confirm_thread_delete);
+        preferences.last_editor = Some("zed".into());
         preferences.confirm_thread_archive = true;
         preferences.plan_mode_enabled = true;
         preferences.desktop_notifications_enabled = true;
@@ -164,6 +167,7 @@ mod tests {
         let saved: Value = serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
         assert_eq!(saved["futureOption"]["enabled"], true);
         assert_eq!(saved["desktopNotificationsEnabled"], true);
+        assert_eq!(saved["lastEditor"], "zed");
         assert_eq!(fs::read_dir(home.0.join("userdata")).unwrap().count(), 2);
     }
 

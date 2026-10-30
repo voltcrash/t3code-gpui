@@ -30,7 +30,8 @@ gpui_kit::assets::icon_assets!(
         ZoomOut,
         Maximize,
         ArrowDown,
-        MessageSquare
+        MessageSquare,
+        SquareArrowOutUpRight
     ]
 );
 

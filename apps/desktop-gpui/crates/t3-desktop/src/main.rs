@@ -9,6 +9,7 @@ mod composer;
 mod custom_snooze;
 mod desktop;
 mod draft_view;
+mod editor;
 mod environment;
 mod format;
 mod launch;

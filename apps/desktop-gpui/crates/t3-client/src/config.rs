@@ -23,6 +23,7 @@ pub enum ConfigStreamItem {
 #[derive(Debug, Default)]
 pub struct ServerState {
     pub providers: Vec<Provider>,
+    pub editors: crate::editors::Catalog,
     pub providers_loaded: bool,
     /// `None` until a settings snapshot arrives.
     pub settings: Option<Settings>,
@@ -40,6 +41,7 @@ impl ServerState {
                 self.thread_visited_tracking =
                     config["environment"]["capabilities"]["threadVisitedTracking"] == true;
                 self.thread_find_progressive = config["threadFindProgressive"] == true;
+                self.editors = crate::editors::Catalog::from_config(&config);
                 self.providers = providers::from_config(&config);
                 self.providers_loaded = true;
                 self.settings = serde_json::from_value(config["settings"].clone()).ok();
@@ -79,7 +81,7 @@ mod tests {
     #[test]
     fn provider_updates_replace_the_list_and_keep_settings() {
         let mut state = ServerState::default();
-        let snapshot = json!({ "version": 1, "type": "snapshot", "config": { "providers": [provider("codex")], "settings": { "defaultRuntimeMode": "full-access" } } });
+        let snapshot = json!({ "version": 1, "type": "snapshot", "config": { "availableEditors":["zed"], "providers": [provider("codex")], "settings": { "defaultRuntimeMode": "full-access" } } });
         assert!(state.apply(serde_json::from_value(snapshot).unwrap()));
         assert_eq!(
             state
@@ -95,6 +97,13 @@ mod tests {
         assert_eq!(state.providers.len(), 1);
         assert_eq!(state.providers[0].instance_id, "claudeAgent");
         assert!(state.settings.is_some());
+        assert_eq!(state.editors.preferred(None).unwrap().id, "zed");
+        state.apply(ConfigStreamItem::Snapshot {
+            config: json!({"availableEditors":["vscode"]}),
+        });
+        assert_eq!(state.editors.preferred(Some("zed")).unwrap().id, "vscode");
+        state.apply(ConfigStreamItem::Snapshot { config: json!({}) });
+        assert!(state.editors.available.is_empty());
     }
 
     #[test]
