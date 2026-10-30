@@ -131,6 +131,16 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
     assert!(matches!(first, ConfigStreamItem::Snapshot { .. }));
     let mut server = ServerState::default();
     server.apply(first);
+    assert!(
+        server.settings.is_some(),
+        "config snapshot includes settings"
+    );
+    assert_eq!(
+        server.settings.as_ref().unwrap().default_runtime_mode,
+        serde_json::from_value::<t3_client::providers::Settings>(config["settings"].clone())
+            .unwrap()
+            .default_runtime_mode
+    );
 
     let unknown = client
         .call::<_, Value>("no.such.method", &json!({}))
@@ -169,9 +179,6 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         assert!(rejected.detail().contains(missing), "{rejected:?}");
     }
 
-    // New-thread defaults read the real settings and provider shapes.
-    let settings: Value = client.call("server.getSettings", &json!({})).await.unwrap();
-    serde_json::from_value::<t3_client::providers::Settings>(settings).unwrap();
     client
         .call::<_, Value>(
             "server.updateSettings",
@@ -1026,14 +1033,15 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
     use t3_client::thread_actions::Action;
     let mut updates =
         client.subscribe::<_, ShellStreamItem>(t3_client::shell::SUBSCRIBE, &json!({}));
-    let mut archive_updates = client.subscribe::<_, t3_client::archives::StreamItem>(
-        t3_client::archives::SUBSCRIBE,
-        &json!({}),
-    );
     let mut archive = t3_client::archives::State::default();
-    archive.apply(archive_updates.next().await.unwrap().unwrap());
     let mut shell = ShellState::default();
     shell.apply(updates.next().await.unwrap().unwrap());
+    archive.finish_snapshot(
+        client
+            .call(t3_client::archives::GET_SNAPSHOT, &json!({}))
+            .await
+            .unwrap(),
+    );
     for action in [
         Action::Rename("Renamed native thread".into()),
         Action::Pin,
@@ -1052,10 +1060,17 @@ async fn verifies_thread_lifecycle(client: &RpcClient, id: &str) {
             .await
             .unwrap();
         loop {
-            tokio::select! {
-                item = updates.next() => { shell.apply(item.unwrap().unwrap()); },
-                item = archive_updates.next() => { archive.apply(item.unwrap().unwrap()); },
+            let item = updates.next().await.unwrap().unwrap();
+            archive.apply_shell(&item);
+            if matches!(item, ShellStreamItem::ThreadRemoved { .. }) {
+                archive.finish_snapshot(
+                    client
+                        .call(t3_client::archives::GET_SNAPSHOT, &json!({}))
+                        .await
+                        .unwrap(),
+                );
             }
+            shell.apply(item);
             let active = shell.threads.get(id);
             let archived = archive.threads.get(id);
             let applied = match &action {

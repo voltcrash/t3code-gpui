@@ -146,6 +146,11 @@ type WhenToken =
 
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+b", command: "sidebar.toggle" },
+  { key: "f6", command: "workspace.focusNext" },
+  { key: "shift+f6", command: "workspace.focusPrevious" },
+  // Some browsers keep plain F6 for their own toolbars; mod+F6 reaches the page in all of them.
+  { key: "mod+f6", command: "workspace.focusNext" },
+  { key: "mod+shift+f6", command: "workspace.focusPrevious" },
   { key: "mod+[", command: "navigation.back", when: "!terminalFocus" },
   { key: "mod+]", command: "navigation.forward", when: "!terminalFocus" },
   { key: "mod+j", command: "terminal.toggle" },
@@ -174,6 +179,7 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+alt+shift+a", command: "appearance.cycle", when: "!terminalFocus" },
   { key: "mod+alt+shift+t", command: "themeEditor.toggle" },
   { key: "mod+s", command: "composer.stash", when: "!terminalFocus" },
+  { key: "mod+/", command: "composer.toggleRichText", when: "!terminalFocus" },
   { key: "mod+shift+enter", command: "thread.steerQueuedMessage", when: "!terminalFocus" },
   { key: "alt+arrowup", command: "thread.editQueuedMessage", when: "composerFocus" },
   { key: "mod+enter", command: "composer.sendAlternate", when: "composerFocus && turnRunning" },
