@@ -61,6 +61,11 @@ pub fn initial(cx: &mut App) -> WindowBounds {
         Placement {
             bounds: rectangle(bounds),
             maximized: false,
+            view: cx
+                .global::<WindowState>()
+                .saved
+                .map(|state| state.view)
+                .unwrap_or_default(),
         }
     });
     let model = cx.global_mut::<WindowState>();
@@ -77,6 +82,23 @@ pub fn initial(cx: &mut App) -> WindowBounds {
         WindowBounds::Maximized(bounds)
     } else {
         WindowBounds::Windowed(bounds)
+    }
+}
+
+pub fn view(cx: &App) -> t3_host::window_state::View {
+    cx.global::<WindowState>()
+        .current
+        .map(|state| state.view)
+        .unwrap_or_default()
+}
+
+pub fn remember_view(view: t3_host::window_state::View, cx: &mut App) {
+    let state = cx.global_mut::<WindowState>();
+    if let Some(current) = &mut state.current
+        && current.view != view
+    {
+        current.view = view;
+        state.dirty = true;
     }
 }
 
@@ -98,6 +120,7 @@ pub fn remember(window: &Window, cx: &mut App) {
         Placement {
             bounds: rectangle(window.window_bounds().get_bounds()),
             maximized: false,
+            ..previous
         }
     };
     if previous != next {

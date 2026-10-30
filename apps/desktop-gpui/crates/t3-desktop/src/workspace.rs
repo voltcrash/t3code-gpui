@@ -239,9 +239,20 @@ impl Workspace {
             .update(cx, |actions, cx| actions.shortcut(id, shortcut, window, cx));
     }
 
+    fn remember_view(&self, cx: &mut App) {
+        crate::window_state::remember_view(
+            t3_host::window_state::View {
+                zoom: self.zoom,
+                sidebar_visible: self.sidebar_visible,
+            },
+            cx,
+        );
+    }
+
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_palette(window, cx);
         self.sidebar_visible = !self.sidebar_visible;
+        self.remember_view(cx);
         if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
             self.focus.focus(window, cx);
         }
@@ -389,12 +400,12 @@ impl Workspace {
             palette_focus: cx.focus_handle(),
             palette_return_focus: None,
             navigation: Default::default(),
-            zoom: 1.,
+            zoom: crate::window_state::view(cx).zoom,
             menu: AppMenuBar::new(cx),
             env,
             sidebar,
             visit,
-            sidebar_visible: true,
+            sidebar_visible: crate::window_state::view(cx).sidebar_visible,
             sidebar_focus: cx.focus_handle(),
             actions,
             thread: None,
@@ -1131,14 +1142,17 @@ impl Render for Workspace {
             })
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
                 this.zoom = (this.zoom * 1.2).min(3.);
+                this.remember_view(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
                 this.zoom = (this.zoom / 1.2).max(0.5);
+                this.remember_view(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ResetZoom, _, cx| {
                 this.zoom = 1.;
+                this.remember_view(cx);
                 cx.notify();
             }))
             .flex()
