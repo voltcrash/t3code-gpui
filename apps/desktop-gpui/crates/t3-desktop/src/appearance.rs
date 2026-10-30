@@ -8,7 +8,6 @@ use std::rc::Rc;
 use gpui_kit::component::{ActiveTheme, Colorize, Theme};
 use gpui_kit::*;
 
-pub const SIDEBAR_WIDTH: Pixels = px(256.);
 pub const TOPBAR_HEIGHT: Pixels = px(52.);
 pub const CONTENT_WIDTH: Pixels = px(736.);
 
