@@ -205,6 +205,31 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
             .as_deref(),
         Some("approval-required")
     );
+    for mode in [Some("worktree"), Some("local"), None] {
+        let saved: t3_client::providers::Settings = client
+            .call(
+                "server.updateSettings",
+                &json!({"patch":{"defaultThreadEnvMode":mode}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.default_thread_env_mode.as_deref(), mode);
+        while server
+            .settings
+            .as_ref()
+            .unwrap()
+            .default_thread_env_mode
+            .as_deref()
+            != mode
+        {
+            server.apply(updates.next().await.unwrap().unwrap());
+        }
+    }
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(home.join("userdata/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["defaultThreadEnvMode"], Value::Null);
+    assert_eq!(saved["defaultRuntimeMode"], "approval-required");
     drop(updates);
 
     // Change a real thread's mode and await its persisted event, without
