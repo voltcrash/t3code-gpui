@@ -19,7 +19,7 @@ const RUNTIME_MODES: [&str; 4] = [
     "auto",
     "full-access",
 ];
-const DEFAULT_RUNTIME_MODE: &str = "full-access";
+pub const DEFAULT_RUNTIME_MODE: &str = "full-access";
 /// Matches the `enabled` decoding default of each driver's settings schema.
 const DEFAULT_DISABLED_DRIVERS: [&str; 6] =
     ["cursor", "grok", "muse", "pi", "opencode", "antigravity"];

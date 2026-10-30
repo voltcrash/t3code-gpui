@@ -179,32 +179,32 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         assert!(rejected.detail().contains(missing), "{rejected:?}");
     }
 
-    client
-        .call::<_, Value>(
-            "server.updateSettings",
-            &json!({
-                "patch": { "defaultRuntimeMode": "approval-required" },
-            }),
-        )
-        .await
-        .unwrap();
-    while let Some(item) = updates.next().await {
-        let item = item.unwrap();
-        let settings_updated = matches!(item, ConfigStreamItem::SettingsUpdated { .. });
-        server.apply(item);
-        if settings_updated {
-            break;
-        }
-    }
-    assert_eq!(
-        server
+    for mode in t3_client::providers::runtime_modes_for(None)
+        .into_iter()
+        .chain([
+            "approval-required",
+            t3_client::providers::DEFAULT_RUNTIME_MODE,
+        ])
+    {
+        let saved: t3_client::providers::Settings = client
+            .call(
+                "server.updateSettings",
+                &json!({"patch":{"defaultRuntimeMode":mode}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.default_runtime_mode.as_deref(), Some(mode));
+        while server
             .settings
             .as_ref()
             .unwrap()
             .default_runtime_mode
-            .as_deref(),
-        Some("approval-required")
-    );
+            .as_deref()
+            != Some(mode)
+        {
+            server.apply(updates.next().await.unwrap().unwrap());
+        }
+    }
     for mode in [Some("worktree"), Some("local"), None] {
         let saved: t3_client::providers::Settings = client
             .call(
@@ -229,7 +229,7 @@ async fn launches_authenticates_and_streams_from_the_real_server() {
         serde_json::from_slice(&std::fs::read(home.join("userdata/settings.json")).unwrap())
             .unwrap();
     assert_eq!(saved["defaultThreadEnvMode"], Value::Null);
-    assert_eq!(saved["defaultRuntimeMode"], "approval-required");
+    assert!(saved.get("defaultRuntimeMode").is_none());
     drop(updates);
 
     // Change a real thread's mode and await its persisted event, without
