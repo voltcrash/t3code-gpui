@@ -68,14 +68,63 @@ pub async fn branches(
     query: &str,
     cursor: Option<u64>,
 ) -> Result<Branches, RpcError> {
-    let mut input = json!({"cwd":cwd, "limit":100, "includeMatchingRemoteRefs":true, "refresh":cursor.is_none() && query.trim().is_empty()});
-    if !query.trim().is_empty() {
-        input["query"] = query.trim().into();
+    let query = ref_query(query);
+    let mut input = json!({"cwd":cwd, "limit":100, "includeMatchingRemoteRefs":true, "refresh":cursor.is_none() && query.is_empty()});
+    if !query.is_empty() {
+        input["query"] = query.into();
     }
     if let Some(cursor) = cursor {
         input["cursor"] = cursor.into();
     }
     rpc.call("vcs.listRefs", &input).await
+}
+
+pub fn ref_query(raw: &str) -> String {
+    raw.trim_matches(|ch: char| ch == '\u{feff}' || (ch.is_whitespace() && ch != '\u{85}'))
+        .split([' ', '\t', '\n', '\r', '\x0c', '\x0b'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+pub fn creation_candidate(strategy: &Strategy, query: &str, branches: &[Branch]) -> Option<Branch> {
+    let name = ref_query(query);
+    if matches!(strategy, Strategy::Worktree { .. })
+        || name.is_empty()
+        || branches.iter().any(|branch| branch.name == name)
+    {
+        return None;
+    }
+    Some(Branch {
+        name,
+        current: false,
+        is_default: false,
+        is_remote: false,
+        worktree_path: None,
+    })
+}
+
+pub async fn checkout(
+    rpc: &RpcClient,
+    cwd: &str,
+    ref_name: &str,
+    create: bool,
+) -> Result<String, RpcError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct UpdatedRef {
+        ref_name: String,
+    }
+    let mut input = json!({"cwd":cwd,"refName":ref_name});
+    let method = if create {
+        input["switchRef"] = true.into();
+        "vcs.createRef"
+    } else {
+        "vcs.switchRef"
+    };
+    rpc.call::<_, UpdatedRef>(method, &input)
+        .await
+        .map(|result| result.ref_name)
 }
 
 #[derive(Debug)]
@@ -332,6 +381,54 @@ mod tests {
                 serde_json::to_value(strategy).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn new_branch_choices_use_sanitized_searches_and_keep_the_active_checkout() {
+        for (query, expected) in [
+            ("  new   branch  ", "new-branch"),
+            ("new\tbranch", "new-branch"),
+            ("new - branch", "new---branch"),
+            ("foo--bar", "foo--bar"),
+            ("new\u{a0}branch", "new\u{a0}branch"),
+            ("new\u{2009}branch", "new\u{2009}branch"),
+            ("\u{feff}feature\u{feff}", "feature"),
+        ] {
+            assert_eq!(ref_query(query), expected);
+        }
+        let mut branches = Vec::new();
+        let root = Strategy::default();
+        let candidate = creation_candidate(&root, "new branch", &branches).unwrap();
+        assert_eq!(candidate.name, "new-branch");
+        let selected = select_branch("/project", &root, &candidate);
+        assert_eq!(selected.checkout_cwd.as_deref(), Some("/project"));
+        let active = Strategy::ExistingWorktree {
+            worktree_path: "/worktrees/feature".into(),
+            branch: Some("feature".into()),
+        };
+        let selected = select_branch("/project", &active, &candidate);
+        assert_eq!(selected.checkout_cwd.as_deref(), Some("/worktrees/feature"));
+        assert_eq!(
+            serde_json::to_value(selected.strategy).unwrap(),
+            json!({
+                "type":"existing_worktree", "worktreePath":"/worktrees/feature", "branch":"new-branch"
+            })
+        );
+        assert!(creation_candidate(&root, " \t", &branches).is_none());
+        assert!(
+            creation_candidate(
+                &Strategy::Worktree {
+                    base_ref: "main".into(),
+                    start_from_origin: false,
+                },
+                "new branch",
+                &branches
+            )
+            .is_none()
+        );
+        branches.push(candidate);
+        assert!(creation_candidate(&root, "new  branch", &branches).is_none());
+        assert!(creation_candidate(&root, "new", &branches).is_some());
     }
 
     #[test]

@@ -62,6 +62,14 @@ impl DraftView {
             cx.subscribe_in(
                 &workspace,
                 window,
+                |this, _, _: &crate::draft_workspace::BranchSelected, window, cx| {
+                    this.composer
+                        .update(cx, |composer, cx| composer.focus(window, cx));
+                },
+            ),
+            cx.subscribe_in(
+                &workspace,
+                window,
                 |this, _, _: &crate::draft_workspace::Changed, window, cx| {
                     this.sync_composer(window, cx);
                     cx.notify();
