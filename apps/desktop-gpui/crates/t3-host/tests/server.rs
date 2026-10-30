@@ -1319,16 +1319,29 @@ async fn verifies_workspace_selection(client: &RpcClient, cwd: &std::path::Path)
         main,
     );
     assert!(new_worktree.checkout_cwd.is_none());
-    client
-        .call::<_, Value>(
-            "vcs.createRef",
-            &json!({"cwd":cwd,"refName":"native-choice","switchRef":false}),
+    let candidate = workspaces::creation_candidate(
+        &workspaces::Strategy::default(),
+        "native choice",
+        &branches.refs,
+    )
+    .unwrap();
+    assert_eq!(
+        workspaces::checkout(client, cwd.to_str().unwrap(), &candidate.name, true)
+            .await
+            .unwrap(),
+        "native-choice"
+    );
+    let refs = workspaces::branches(client, cwd.to_str().unwrap(), "native choice", None)
+        .await
+        .unwrap();
+    assert!(
+        workspaces::creation_candidate(
+            &workspaces::Strategy::default(),
+            "native choice",
+            &refs.refs,
         )
-        .await
-        .unwrap();
-    let refs = workspaces::branches(client, cwd.to_str().unwrap(), "native-choice", None)
-        .await
-        .unwrap();
+        .is_none()
+    );
     let branch = refs
         .refs
         .iter()
@@ -1340,13 +1353,13 @@ async fn verifies_workspace_selection(client: &RpcClient, cwd: &std::path::Path)
         branch,
     );
     let checkout_cwd = selected.checkout_cwd.unwrap();
-    client
-        .call::<_, Value>(
-            "vcs.switchRef",
-            &json!({"cwd":checkout_cwd,"refName":branch.name}),
-        )
+    workspaces::checkout(client, &checkout_cwd, &branch.name, false)
         .await
         .unwrap();
+    assert!(matches!(
+        workspaces::checkout(client, &checkout_cwd, &branch.name, true).await,
+        Err(RpcError::Failure(_))
+    ));
     assert_eq!(
         fixture_git(cwd, &["branch", "--show-current"]).await.trim(),
         "native-choice"
@@ -1401,6 +1414,27 @@ async fn verifies_workspace_selection(client: &RpcClient, cwd: &std::path::Path)
         std::path::PathBuf::from(worktree.expect("workspace preparation records the worktree"));
     assert!(worktree.join(".git").is_file());
     assert!(worktree.join("app.rs").is_file());
+    let in_worktree = workspaces::Strategy::ExistingWorktree {
+        worktree_path: worktree.to_str().unwrap().into(),
+        branch: None,
+    };
+    let candidate = workspaces::creation_candidate(&in_worktree, "worktree choice", &[]).unwrap();
+    let selected = workspaces::select_branch(cwd.to_str().unwrap(), &in_worktree, &candidate);
+    workspaces::checkout(
+        client,
+        &selected.checkout_cwd.unwrap(),
+        &candidate.name,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture_git(&worktree, &["branch", "--show-current"])
+            .await
+            .trim(),
+        "worktree-choice"
+    );
+
     assert_eq!(
         fixture_git(cwd, &["branch", "--show-current"]).await.trim(),
         "review-fixture"

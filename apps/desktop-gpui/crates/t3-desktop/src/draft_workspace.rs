@@ -16,6 +16,8 @@ use crate::tokio_bridge;
 
 pub struct Changed;
 impl EventEmitter<Changed> for DraftWorkspace {}
+pub struct BranchSelected;
+impl EventEmitter<BranchSelected> for DraftWorkspace {}
 
 pub struct DraftWorkspace {
     env: Entity<LocalEnvironment>,
@@ -56,6 +58,8 @@ impl DraftWorkspace {
                 InputEvent::PressEnter { .. } => {
                     if let Some(branch) = this.branches.get(this.selected).cloned() {
                         this.select_branch(branch, cx);
+                    } else {
+                        this.create_branch(cx);
                     }
                 }
                 _ => {}
@@ -353,7 +357,28 @@ impl DraftWorkspace {
         cx.notify();
     }
 
+    fn creation_candidate(&self, cx: &App) -> Option<Branch> {
+        if self.loading.is_some() || self.error.is_some() || !self.can_choose(cx) {
+            return None;
+        }
+        workspaces::creation_candidate(
+            &self.strategy(cx),
+            &self.query.read(cx).value(),
+            &self.branches,
+        )
+    }
+
+    fn create_branch(&mut self, cx: &mut Context<Self>) {
+        if let Some(branch) = self.creation_candidate(cx) {
+            self.change_branch(branch, true, cx);
+        }
+    }
+
     fn select_branch(&mut self, branch: Branch, cx: &mut Context<Self>) {
+        self.change_branch(branch, false, cx);
+    }
+
+    fn change_branch(&mut self, branch: Branch, create: bool, cx: &mut Context<Self>) {
         if !self.ready() || self.env.read(cx).new_thread_drafts.messages.busy(&self.id) {
             return;
         }
@@ -362,6 +387,7 @@ impl DraftWorkspace {
         let mut strategy = selection.strategy;
         let Some(checkout_cwd) = selection.checkout_cwd else {
             self.set(strategy, cx);
+            cx.emit(BranchSelected);
             return;
         };
         let Some(rpc) = self.env.read(cx).rpc.clone() else {
@@ -372,14 +398,11 @@ impl DraftWorkspace {
         self.loading = None;
         self.changing_branch = true;
         self.open = false;
+        cx.emit(BranchSelected);
         self.error = None;
         let ref_name = branch.name.clone();
         let changing = tokio_bridge::spawn(cx, async move {
-            rpc.call::<_, Value>(
-                "vcs.switchRef",
-                &json!({"cwd":checkout_cwd,"refName":ref_name}),
-            )
-            .await
+            workspaces::checkout(&rpc, &checkout_cwd, &ref_name, create).await
         });
         cx.spawn(async move |this, cx| {
             let result = changing.await;
@@ -389,20 +412,7 @@ impl DraftWorkspace {
                 }
                 this.changing_branch = false;
                 match result {
-                    Ok(Ok(result)) => {
-                        let name = result["refName"]
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| {
-                                if branch.is_remote {
-                                    branch
-                                        .name
-                                        .split_once('/')
-                                        .map_or(branch.name.clone(), |(_, name)| name.into())
-                                } else {
-                                    branch.name.clone()
-                                }
-                            });
+                    Ok(Ok(name)) => {
                         this.current = Some(name.clone());
                         match &mut strategy {
                             Strategy::Root { branch }
@@ -412,10 +422,12 @@ impl DraftWorkspace {
                         this.set(strategy, cx);
                     }
                     error => {
-                        tracing::warn!(?error, "switching draft branch failed");
-                        this.error = Some(
-                            "Could not switch branch. Check the working tree and try again.".into(),
-                        );
+                        tracing::warn!(?error, create, "updating draft branch failed");
+                        this.error = Some(if create {
+                            "Could not create branch. Check its name and the working tree, then try again.".into()
+                        } else {
+                            "Could not switch branch. Check the working tree and try again.".into()
+                        });
                     }
                 }
                 cx.emit(Changed);
@@ -428,15 +440,17 @@ impl DraftWorkspace {
     }
 
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if !self.branches.is_empty() {
-            self.selected =
-                (self.selected as isize + delta).rem_euclid(self.branches.len() as isize) as usize;
+        let count = self.branches.len() + usize::from(self.creation_candidate(cx).is_some());
+        if count > 0 {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
             self.scroll.scroll_to_item(self.selected);
             cx.notify();
         }
     }
 
     fn picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let creation = self.creation_candidate(cx);
+        let can_create = creation.is_some();
         v_flex()
             .key_context("DraftBranches")
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
@@ -487,13 +501,39 @@ impl DraftWorkspace {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select_branch(branch.clone(), cx)
                             }))
-                    })),
+                    }))
+                    .when_some(creation, |list, branch| {
+                        list.child(
+                            h_flex()
+                                .id("create-branch")
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .text_sm()
+                                .when(self.selected == self.branches.len(), |row| {
+                                    row.bg(cx.theme().accent)
+                                })
+                                .hover(|row| row.bg(cx.theme().accent))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("Create new ref \"{}\"", branch.name)),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.create_branch(cx))),
+                        )
+                    }),
             )
             .when(self.loading.is_some(), |view| {
                 view.child(div().text_xs().child("Loading branches…"))
             })
             .when(
-                self.loading.is_none() && self.branches.is_empty() && self.error.is_none(),
+                self.loading.is_none()
+                    && self.branches.is_empty()
+                    && self.error.is_none()
+                    && !can_create,
                 |view| view.child(div().text_xs().child("No branches found")),
             )
             .when_some(self.error.clone(), |view, error| {
@@ -641,7 +681,7 @@ impl Render for DraftWorkspace {
                 },
             )
             .when(self.changing_branch, |row| {
-                row.child(div().text_xs().child("Switching branch…"))
+                row.child(div().text_xs().child("Updating branch…"))
             })
             .when(self.error.is_some() && self.loaded && !self.open, |row| {
                 row.child(
