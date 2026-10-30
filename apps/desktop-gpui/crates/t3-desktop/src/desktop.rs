@@ -79,6 +79,8 @@ pub fn init(launch: BackendLaunch, cx: &mut App) {
     GlobalState::global_mut(cx).set_app_menus(menus().into_iter().map(Menu::owned).collect());
     cx.on_window_closed(|cx, id| {
         crate::window_state::save(cx);
+        let env = cx.global::<Desktop>().env.clone();
+        env.update(cx, |env, cx| env.save_drafts(cx));
         let desktop = cx.global_mut::<Desktop>();
         if desktop
             .window

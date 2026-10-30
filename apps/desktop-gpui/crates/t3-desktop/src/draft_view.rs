@@ -3,7 +3,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use t3_client::providers::{self, NewThreadDefaults, ProjectDefaults};
@@ -21,6 +21,7 @@ impl EventEmitter<DraftEvent> for DraftView {}
 
 pub struct DraftView {
     env: Entity<LocalEnvironment>,
+    id: String,
     project_id: String,
     defaults: Option<NewThreadDefaults>,
     loaded: bool,
@@ -31,16 +32,18 @@ pub struct DraftView {
 impl DraftView {
     pub fn new(
         env: Entity<LocalEnvironment>,
+        id: String,
         project_id: String,
+        attachments: Entity<AttachmentDraft>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let target = Target::Draft(NewThread {
+            id: id.clone(),
             project_id: project_id.clone(),
             defaults: None,
             loaded: false,
         });
-        let attachments = cx.new(|_| AttachmentDraft::new(env.clone()));
         let composer =
             cx.new(|cx| Composer::new(env.clone(), target, None, attachments, window, cx));
         composer.update(cx, |composer, cx| composer.focus(window, cx));
@@ -54,6 +57,7 @@ impl DraftView {
         ];
         let mut view = Self {
             env,
+            id,
             project_id,
             defaults: None,
             loaded: false,
@@ -62,6 +66,15 @@ impl DraftView {
         };
         view.load(window, cx);
         view
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn project_id(&self) -> &str {
@@ -79,6 +92,13 @@ impl DraftView {
 
     fn set_project(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if project_id != self.project_id {
+            if self.env.read(cx).new_thread_drafts.messages.busy(&self.id) {
+                return;
+            }
+            self.env.update(cx, |env, cx| {
+                env.new_thread_drafts.set_project(&self.id, &project_id);
+                cx.notify();
+            });
             self.project_id = project_id;
             self.defaults = None;
             self.loaded = false;
@@ -119,6 +139,7 @@ impl DraftView {
 
     fn sync_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         let new_thread = NewThread {
+            id: self.id.clone(),
             project_id: self.project_id.clone(),
             defaults: self.defaults.clone(),
             loaded: self.loaded,
@@ -146,6 +167,7 @@ impl Render for DraftView {
         let current = self.project_id.clone();
         let this = cx.entity().downgrade();
         let picker = Button::new("draft-project")
+            .disabled(env.new_thread_drafts.messages.busy(&self.id))
             .label(project_name)
             .ghost()
             .large()
