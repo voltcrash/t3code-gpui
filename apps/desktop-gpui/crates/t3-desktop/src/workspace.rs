@@ -385,7 +385,7 @@ impl Workspace {
             return;
         }
         self.settings_return_focus = window.focused(cx);
-        let settings = cx.new(|cx| Settings::new(window, cx));
+        let settings = cx.new(|cx| Settings::new(self.env.clone(), window, cx));
         let subscription =
             cx.subscribe_in(&settings, window, |this, _, _: &settings::Closed, _, cx| {
                 this.settings = None;

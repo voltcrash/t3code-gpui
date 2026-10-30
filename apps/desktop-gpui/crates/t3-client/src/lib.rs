@@ -16,6 +16,7 @@ pub mod navigation;
 pub mod notifications;
 pub mod planning;
 pub mod projects;
+pub mod provider_settings;
 pub mod providers;
 pub mod requests;
 pub mod review;
